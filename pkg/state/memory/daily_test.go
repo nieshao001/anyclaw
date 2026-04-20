@@ -57,9 +57,9 @@ func TestSearchDailyMarkdownFindsDateAndSnippet(t *testing.T) {
 		t.Fatalf("WriteFile: %v", err)
 	}
 
-	results, err := searchDailyMarkdownAt(dir, "alpha", 5, "", time.Date(2026, 3, 29, 10, 0, 0, 0, time.UTC))
+	results, err := SearchDailyMarkdown(dir, "alpha", 5, "")
 	if err != nil {
-		t.Fatalf("searchDailyMarkdownAt: %v", err)
+		t.Fatalf("SearchDailyMarkdown: %v", err)
 	}
 	if len(results) != 1 {
 		t.Fatalf("expected 1 match, got %d", len(results))
@@ -74,29 +74,32 @@ func TestSearchDailyMarkdownFindsDateAndSnippet(t *testing.T) {
 
 func TestGetDailyMarkdownSupportsRelativeReferences(t *testing.T) {
 	dir := t.TempDir()
+	now := time.Now().UTC()
+	today := now.Format("2006-01-02")
+	yesterday := now.AddDate(0, 0, -1).Format("2006-01-02")
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatalf("MkdirAll: %v", err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, "2026-03-29.md"), []byte("# Daily Memory 2026-03-29\n\nToday entry."), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, today+".md"), []byte("# Daily Memory "+today+"\n\nToday entry."), 0o644); err != nil {
 		t.Fatalf("WriteFile: %v", err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, "2026-03-28.md"), []byte("# Daily Memory 2026-03-28\n\nYesterday entry."), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, yesterday+".md"), []byte("# Daily Memory "+yesterday+"\n\nYesterday entry."), 0o644); err != nil {
 		t.Fatalf("WriteFile: %v", err)
 	}
 
-	file, err := getDailyMarkdownAt(dir, "yesterday", time.Date(2026, 3, 29, 10, 0, 0, 0, time.UTC))
+	file, err := GetDailyMarkdown(dir, "yesterday")
 	if err != nil {
-		t.Fatalf("getDailyMarkdownAt(yesterday): %v", err)
+		t.Fatalf("GetDailyMarkdown(yesterday): %v", err)
 	}
-	if file.Date != "2026-03-28" {
+	if file.Date != yesterday {
 		t.Fatalf("expected yesterday file, got %q", file.Date)
 	}
 
-	latest, err := getDailyMarkdownAt(dir, "latest", time.Date(2026, 3, 29, 10, 0, 0, 0, time.UTC))
+	latest, err := GetDailyMarkdown(dir, "latest")
 	if err != nil {
-		t.Fatalf("getDailyMarkdownAt(latest): %v", err)
+		t.Fatalf("GetDailyMarkdown(latest): %v", err)
 	}
-	if latest.Date != "2026-03-29" {
+	if latest.Date != today {
 		t.Fatalf("expected latest file, got %q", latest.Date)
 	}
 }
