@@ -73,3 +73,53 @@ func TestChannelPolicyFromConfigAllowsExplicitFalseOverrides(t *testing.T) {
 		t.Fatal("expected default_deny_dm to respect explicit false override")
 	}
 }
+
+func TestChannelPolicyWrapBlocksUnpairedDMWhenPairingRequired(t *testing.T) {
+	policy := DefaultChannelPolicy()
+	policy.SetDMPolicy(DMPolicyPairing)
+	policy.SetPairingEnabled(true)
+
+	wrapped := policy.Wrap(func(ctx context.Context, sessionID string, message string, meta map[string]string) (string, string, error) {
+		t.Fatal("handler should not be called for unpaired DM")
+		return "", "", nil
+	})
+
+	_, _, err := wrapped(context.Background(), "session-1", "hello", map[string]string{
+		"channel": "telegram",
+		"chat_id": "42",
+		"user_id": "42",
+	})
+	if err == nil {
+		t.Fatal("expected unpaired DM to be blocked")
+	}
+	if !strings.Contains(err.Error(), "blocked by DM policy") {
+		t.Fatalf("expected DM policy error, got %v", err)
+	}
+}
+
+func TestChannelPolicyWrapAllowsPairedDMWhenPairingRequired(t *testing.T) {
+	policy := DefaultChannelPolicy()
+	policy.SetDMPolicy(DMPolicyPairing)
+	policy.SetPairingEnabled(true)
+
+	meta := map[string]string{
+		"channel": "telegram",
+		"chat_id": "42",
+		"user_id": "42",
+	}
+	policy.PairDM("42", meta)
+
+	called := false
+	wrapped := policy.Wrap(func(ctx context.Context, sessionID string, message string, meta map[string]string) (string, string, error) {
+		called = true
+		return sessionID, "ok", nil
+	})
+
+	_, _, err := wrapped(context.Background(), "session-1", "hello", meta)
+	if err != nil {
+		t.Fatalf("expected paired DM to pass, got %v", err)
+	}
+	if !called {
+		t.Fatal("expected paired DM to reach handler")
+	}
+}

@@ -33,6 +33,7 @@ type ChannelPolicy struct {
 	dmPolicy         DMPolicy
 	groupPolicy      GroupPolicy
 	allowFrom        map[string]bool
+	pairedDMs        map[string]time.Time
 	pairingEnabled   bool
 	pairingTTL       time.Duration
 	mentionGate      bool
@@ -45,6 +46,7 @@ func DefaultChannelPolicy() *ChannelPolicy {
 		dmPolicy:         DMPolicyAllowList,
 		groupPolicy:      GroupPolicyMention,
 		allowFrom:        make(map[string]bool),
+		pairedDMs:        make(map[string]time.Time),
 		pairingEnabled:   false,
 		pairingTTL:       72 * time.Hour,
 		mentionGate:      true,
@@ -122,6 +124,10 @@ func (p *ChannelPolicy) Validate() []string {
 		issues = append(issues, "dm_policy is allow-list but allow_from is empty")
 	}
 
+	if p.dmPolicy == DMPolicyPairing && !p.pairingEnabled {
+		issues = append(issues, "dm_policy is pairing but pairing is disabled")
+	}
+
 	if p.dmPolicy == DMPolicyAllowAll && !p.riskAcknowledged {
 		issues = append(issues, "dm_policy is allow-all without risk acknowledgement")
 	}
@@ -134,20 +140,31 @@ func (p *ChannelPolicy) Validate() []string {
 }
 
 func (p *ChannelPolicy) AllowDM(userID string) bool {
-	p.mu.RLock()
-	defer p.mu.RUnlock()
+	return p.allowDM(userID, nil)
+}
 
-	switch p.dmPolicy {
+func (p *ChannelPolicy) allowDM(userID string, meta map[string]string) bool {
+	p.mu.RLock()
+	dmPolicy := p.dmPolicy
+	allowed := p.allowFrom[userID]
+	pairingEnabled := p.pairingEnabled
+	defaultDenyDM := p.defaultDenyDM
+	p.mu.RUnlock()
+
+	switch dmPolicy {
 	case DMPolicyDenyAll:
 		return false
 	case DMPolicyAllowAll:
 		return true
 	case DMPolicyAllowList:
-		return p.allowFrom[userID]
+		return allowed
 	case DMPolicyPairing:
-		return true
+		if !pairingEnabled {
+			return false
+		}
+		return p.IsDMPaired(userID, meta)
 	default:
-		if p.defaultDenyDM {
+		if defaultDenyDM {
 			return false
 		}
 		return true
@@ -284,6 +301,48 @@ func (p *ChannelPolicy) DefaultDenyDM() bool {
 	return p.defaultDenyDM
 }
 
+func (p *ChannelPolicy) PairDM(userID string, meta map[string]string) {
+	key := directPairingKey(userID, meta)
+	if key == "" {
+		return
+	}
+
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.pairedDMs[key] = time.Now().UTC().Add(p.pairingTTL)
+}
+
+func (p *ChannelPolicy) UnpairDM(userID string, meta map[string]string) {
+	key := directPairingKey(userID, meta)
+	if key == "" {
+		return
+	}
+
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	delete(p.pairedDMs, key)
+}
+
+func (p *ChannelPolicy) IsDMPaired(userID string, meta map[string]string) bool {
+	key := directPairingKey(userID, meta)
+	if key == "" {
+		return false
+	}
+
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	expiresAt, ok := p.pairedDMs[key]
+	if !ok {
+		return false
+	}
+	if time.Now().UTC().After(expiresAt) {
+		delete(p.pairedDMs, key)
+		return false
+	}
+	return true
+}
+
 func (p *ChannelPolicy) Wrap(handler InboundHandler) InboundHandler {
 	return func(ctx context.Context, sessionID string, message string, meta map[string]string) (string, string, error) {
 		userID := meta["user_id"]
@@ -295,7 +354,7 @@ func (p *ChannelPolicy) Wrap(handler InboundHandler) InboundHandler {
 				return sessionID, "", fmt.Errorf("user %s blocked by group policy", userID)
 			}
 		} else if isDirectChannelPolicyType(channelType) {
-			if !p.AllowDM(userID) {
+			if !p.allowDM(userID, meta) {
 				return sessionID, "", fmt.Errorf("user %s blocked by DM policy", userID)
 			}
 		}
@@ -315,7 +374,7 @@ func (p *ChannelPolicy) WrapStream(handler StreamChunkHandler) StreamChunkHandle
 				return sessionID, fmt.Errorf("user %s blocked by group policy", userID)
 			}
 		} else if isDirectChannelPolicyType(channelType) {
-			if !p.AllowDM(userID) {
+			if !p.allowDM(userID, meta) {
 				return sessionID, fmt.Errorf("user %s blocked by DM policy", userID)
 			}
 		}
@@ -431,6 +490,34 @@ func mentionIDsForPolicy(meta map[string]string) []string {
 		}
 	}
 	return result
+}
+
+func directPairingKey(userID string, meta map[string]string) string {
+	userID = strings.TrimSpace(userID)
+	if userID == "" {
+		return ""
+	}
+
+	channel := strings.TrimSpace(meta["channel"])
+	if channel == "" {
+		channel = "direct"
+	}
+
+	scope := strings.TrimSpace(meta["device_id"])
+	if scope == "" {
+		scope = strings.TrimSpace(meta["chat_id"])
+	}
+	if scope == "" {
+		scope = strings.TrimSpace(meta["channel_id"])
+	}
+	if scope == "" {
+		scope = strings.TrimSpace(meta["thread_id"])
+	}
+	if scope == "" {
+		scope = userID
+	}
+
+	return fmt.Sprintf("%s:%s:%s", channel, userID, scope)
 }
 
 type SecurityAuditResult struct {

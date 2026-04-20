@@ -54,3 +54,12 @@ func TestMentionGateBlocksTelegramGroupMessagesWithoutMentionFallback(t *testing
 		t.Fatal("expected telegram group message without mention to be blocked")
 	}
 }
+
+func TestGroupSecurityDenyGroupBlocksWithoutApprovalMode(t *testing.T) {
+	security := NewGroupSecurity()
+	security.DenyGroup("group-1")
+
+	if security.ShouldProcess("user-1", "group-1") {
+		t.Fatal("expected denied group to be blocked even when approval mode is off")
+	}
+}

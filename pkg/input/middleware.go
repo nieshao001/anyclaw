@@ -321,6 +321,7 @@ func stripMentions(text string, mentionIDs []string) string {
 type GroupSecurity struct {
 	mu              sync.RWMutex
 	allowedGroups   map[string]map[string]bool
+	deniedGroups    map[string]bool
 	deniedUsers     map[string]bool
 	allowedUsers    map[string]bool
 	requireApproval bool
@@ -329,6 +330,7 @@ type GroupSecurity struct {
 func NewGroupSecurity() *GroupSecurity {
 	return &GroupSecurity{
 		allowedGroups: make(map[string]map[string]bool),
+		deniedGroups:  make(map[string]bool),
 		deniedUsers:   make(map[string]bool),
 		allowedUsers:  make(map[string]bool),
 	}
@@ -341,12 +343,14 @@ func (gs *GroupSecurity) AllowGroup(groupID string) {
 		gs.allowedGroups[groupID] = make(map[string]bool)
 	}
 	gs.allowedGroups[groupID]["allowed"] = true
+	delete(gs.deniedGroups, groupID)
 }
 
 func (gs *GroupSecurity) DenyGroup(groupID string) {
 	gs.mu.Lock()
 	defer gs.mu.Unlock()
 	delete(gs.allowedGroups, groupID)
+	gs.deniedGroups[groupID] = true
 }
 
 func (gs *GroupSecurity) AllowUser(userID string) {
@@ -376,6 +380,9 @@ func (gs *GroupSecurity) ShouldProcess(userID string, groupID string) bool {
 	}
 
 	if groupID != "" {
+		if gs.deniedGroups[groupID] {
+			return false
+		}
 		if gs.allowedGroups[groupID] == nil {
 			return !gs.requireApproval
 		}
