@@ -570,9 +570,13 @@ func TestDiscordAdapterStreamingFallback(t *testing.T) {
 	}, nil)
 	adapter.client = server.Client()
 
-	err := adapter.sendStreamingMessage(context.Background(), "chan-1", "", func(onChunk func(chunk string)) error {
-		onChunk("hello")
-		onChunk(" discord")
+	err := adapter.sendStreamingMessage(context.Background(), "chan-1", "", func(onChunk func(chunk string) error) error {
+		if err := onChunk("hello"); err != nil {
+			return err
+		}
+		if err := onChunk(" discord"); err != nil {
+			return err
+		}
 		return nil
 	})
 	if err != nil {
@@ -599,6 +603,15 @@ func TestSlackHelpersAndMetadata(t *testing.T) {
 	}
 	if got := boolString(false); got != "false" {
 		t.Fatalf("expected false string, got %q", got)
+	}
+	if !slackTSLessOrEqual("1710000000.000100", "1710000000.000100") {
+		t.Fatal("expected equal slack timestamps to compare as less-or-equal")
+	}
+	if !slackTSLessOrEqual("1710000000.000099", "1710000000.000100") {
+		t.Fatal("expected older slack timestamp to compare as less-or-equal")
+	}
+	if slackTSLessOrEqual("1710000000.000101", "1710000000.000100") {
+		t.Fatal("expected newer slack timestamp to compare as greater")
 	}
 }
 
@@ -659,6 +672,7 @@ func TestSlackAdapterPollOnceAndStream(t *testing.T) {
 		Enabled:        true,
 		BotToken:       "token",
 		DefaultChannel: "C123",
+		StreamInterval: 1,
 	}, func(eventType string, sessionID string, payload map[string]any) {})
 
 	var historyCalls int
@@ -763,6 +777,66 @@ func TestSlackAdapterPollOnceAndStream(t *testing.T) {
 	}
 }
 
+func TestSlackAdapterPollOnceSkipsOlderMessages(t *testing.T) {
+	var calls []string
+
+	adapter := NewSlackAdapter(config.SlackChannelConfig{
+		Enabled:        true,
+		BotToken:       "token",
+		DefaultChannel: "C123",
+	}, nil)
+
+	historyCalls := 0
+	adapter.client = &http.Client{
+		Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			switch req.URL.Path {
+			case "/api/conversations.history":
+				historyCalls++
+				if historyCalls == 1 {
+					return jsonResponse(http.StatusOK, map[string]any{
+						"ok": true,
+						"messages": []map[string]any{
+							{"text": "second", "ts": "1710000000.000200", "user": "U2"},
+							{"text": "first", "ts": "1710000000.000100", "user": "U1"},
+						},
+					}), nil
+				}
+				return jsonResponse(http.StatusOK, map[string]any{
+					"ok": true,
+					"messages": []map[string]any{
+						{"text": "third", "ts": "1710000000.000300", "user": "U3"},
+						{"text": "second", "ts": "1710000000.000200", "user": "U2"},
+						{"text": "first", "ts": "1710000000.000100", "user": "U1"},
+					},
+				}), nil
+			case "/api/chat.postMessage":
+				return jsonResponse(http.StatusOK, map[string]any{"ok": true, "ts": "reply-ts"}), nil
+			default:
+				return nil, fmt.Errorf("unexpected request path: %s", req.URL.Path)
+			}
+		}),
+	}
+
+	handle := func(ctx context.Context, sessionID string, message string, meta map[string]string) (string, string, error) {
+		calls = append(calls, message)
+		return "session", "ok", nil
+	}
+
+	if err := adapter.pollOnce(context.Background(), handle); err != nil {
+		t.Fatalf("first pollOnce returned error: %v", err)
+	}
+	if err := adapter.pollOnce(context.Background(), handle); err != nil {
+		t.Fatalf("second pollOnce returned error: %v", err)
+	}
+
+	if len(calls) != 3 {
+		t.Fatalf("expected only new slack message to be processed on second poll, got %v", calls)
+	}
+	if calls[2] != "third" {
+		t.Fatalf("expected final processed message to be third, got %v", calls)
+	}
+}
+
 func TestSlackAdapterErrorBranchesAndFallback(t *testing.T) {
 	adapter := NewSlackAdapter(config.SlackChannelConfig{
 		Enabled:        true,
@@ -796,8 +870,10 @@ func TestSlackAdapterErrorBranchesAndFallback(t *testing.T) {
 		t.Fatalf("expected slack history error, got %v", err)
 	}
 
-	if err := adapter.sendStreamingMessage(context.Background(), "thread-1", func(onChunk func(chunk string)) error {
-		onChunk("fallback")
+	if err := adapter.sendStreamingMessage(context.Background(), "thread-1", func(onChunk func(chunk string) error) error {
+		if err := onChunk("fallback"); err != nil {
+			return err
+		}
 		return nil
 	}); err != nil {
 		t.Fatalf("expected slack streaming fallback to succeed, got %v", err)
@@ -805,6 +881,37 @@ func TestSlackAdapterErrorBranchesAndFallback(t *testing.T) {
 
 	if err := adapter.editMessage(context.Background(), "ts-1", "hello"); err == nil || !strings.Contains(err.Error(), "edit_failed") {
 		t.Fatalf("expected slack update failure, got %v", err)
+	}
+}
+
+func TestSlackAdapterSendStreamingMessageReturnsEditError(t *testing.T) {
+	adapter := NewSlackAdapter(config.SlackChannelConfig{
+		Enabled:        true,
+		BotToken:       "token",
+		DefaultChannel: "C123",
+		StreamInterval: 1,
+	}, nil)
+
+	postCalls := 0
+	adapter.client = &http.Client{
+		Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			switch req.URL.Path {
+			case "/api/chat.postMessage":
+				postCalls++
+				return jsonResponse(http.StatusOK, map[string]any{"ok": true, "ts": fmt.Sprintf("ts-%d", postCalls)}), nil
+			case "/api/chat.update":
+				return jsonResponse(http.StatusOK, map[string]any{"ok": false, "error": "edit_failed"}), nil
+			default:
+				return nil, fmt.Errorf("unexpected request path: %s", req.URL.Path)
+			}
+		}),
+	}
+
+	err := adapter.sendStreamingMessage(context.Background(), "thread-1", func(onChunk func(chunk string) error) error {
+		return onChunk("hello")
+	})
+	if err == nil || !strings.Contains(err.Error(), "edit_failed") {
+		t.Fatalf("expected slack streaming edit failure, got %v", err)
 	}
 }
 

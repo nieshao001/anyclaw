@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -110,10 +111,9 @@ func (a *SlackAdapter) pollOnce(ctx context.Context, handle inputlayer.InboundHa
 
 	for i := len(payload.Messages) - 1; i >= 0; i-- {
 		msg := payload.Messages[i]
-		if msg.Ts == "" || msg.Ts == a.latestTS || msg.BotID != "" {
+		if msg.Ts == "" || slackTSLessOrEqual(msg.Ts, a.latestTS) || msg.BotID != "" {
 			continue
 		}
-		a.latestTS = msg.Ts
 		channelType, isGroup := slackConversationMetadata(a.config.DefaultChannel)
 
 		meta := map[string]string{
@@ -144,6 +144,7 @@ func (a *SlackAdapter) pollOnce(ctx context.Context, handle inputlayer.InboundHa
 			if err := a.sendMessage(ctx, response, msg.ThreadTS); err != nil {
 				return err
 			}
+			a.latestTS = msg.Ts
 			a.base.MarkActivity()
 			a.append("channel.slack.voice", sessionID, map[string]any{
 				"channel":      a.config.DefaultChannel,
@@ -156,6 +157,7 @@ func (a *SlackAdapter) pollOnce(ctx context.Context, handle inputlayer.InboundHa
 		}
 
 		if strings.TrimSpace(msg.Text) == "" {
+			a.latestTS = msg.Ts
 			continue
 		}
 
@@ -166,6 +168,7 @@ func (a *SlackAdapter) pollOnce(ctx context.Context, handle inputlayer.InboundHa
 		if err := a.sendMessage(ctx, response, msg.ThreadTS); err != nil {
 			return err
 		}
+		a.latestTS = msg.Ts
 		a.base.MarkActivity()
 		a.append("channel.slack.message", sessionID, map[string]any{
 			"channel": a.config.DefaultChannel,
@@ -284,9 +287,12 @@ func (a *SlackAdapter) editMessage(ctx context.Context, ts string, text string) 
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := a.client.Do(req)
 	if err != nil {
-		return nil
+		return err
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode >= 300 {
+		return fmt.Errorf("slack update failed: %s", resp.Status)
+	}
 	var result struct {
 		OK    bool   `json:"ok"`
 		Error string `json:"error"`
@@ -303,7 +309,7 @@ func (a *SlackAdapter) editMessage(ctx context.Context, ts string, text string) 
 	return nil
 }
 
-func (a *SlackAdapter) sendStreamingMessage(ctx context.Context, threadTS string, streamFn func(onChunk func(chunk string)) error) error {
+func (a *SlackAdapter) sendStreamingMessage(ctx context.Context, threadTS string, streamFn func(onChunk func(chunk string) error) error) error {
 	streamInterval := time.Duration(a.config.StreamInterval) * time.Millisecond
 	if streamInterval <= 0 {
 		streamInterval = 500 * time.Millisecond
@@ -314,7 +320,12 @@ func (a *SlackAdapter) sendStreamingMessage(ctx context.Context, threadTS string
 		return err
 	}
 	if initialTs == "" {
-		return streamWithMessageFallback(streamFn, func(final string) error {
+		return streamWithMessageFallback(func(onChunk func(chunk string)) error {
+			return streamFn(func(chunk string) error {
+				onChunk(chunk)
+				return nil
+			})
+		}, func(final string) error {
 			return a.sendMessage(ctx, final, threadTS)
 		})
 	}
@@ -323,7 +334,7 @@ func (a *SlackAdapter) sendStreamingMessage(ctx context.Context, threadTS string
 	var mu sync.Mutex
 	lastEdit := time.Now()
 
-	onChunk := func(chunk string) {
+	onChunk := func(chunk string) error {
 		mu.Lock()
 		accumulated.WriteString(chunk)
 		shouldEdit := time.Since(lastEdit) >= streamInterval
@@ -336,23 +347,27 @@ func (a *SlackAdapter) sendStreamingMessage(ctx context.Context, threadTS string
 			mu.Lock()
 			text := accumulated.String()
 			mu.Unlock()
-			a.editMessage(ctx, initialTs, text)
+			if err := a.editMessage(ctx, initialTs, text); err != nil {
+				return err
+			}
 		}
+		return nil
 	}
 
 	if err := streamFn(onChunk); err != nil {
 		mu.Lock()
 		final := accumulated.String()
 		mu.Unlock()
-		a.editMessage(ctx, initialTs, final+"\n\n[Error: "+err.Error()+"]")
+		if editErr := a.editMessage(ctx, initialTs, final+"\n\n[Error: "+err.Error()+"]"); editErr != nil {
+			return errors.Join(err, editErr)
+		}
 		return err
 	}
 
 	mu.Lock()
 	final := accumulated.String()
 	mu.Unlock()
-	a.editMessage(ctx, initialTs, final)
-	return nil
+	return a.editMessage(ctx, initialTs, final)
 }
 
 func (a *SlackAdapter) RunStream(ctx context.Context, handle inputlayer.StreamChunkHandler) error {
@@ -415,12 +430,12 @@ func (a *SlackAdapter) pollOnceStream(ctx context.Context, handle inputlayer.Str
 
 	for i := len(payload.Messages) - 1; i >= 0; i-- {
 		msg := payload.Messages[i]
-		if msg.Ts == "" || msg.Ts == a.latestTS || msg.BotID != "" {
+		if msg.Ts == "" || slackTSLessOrEqual(msg.Ts, a.latestTS) || msg.BotID != "" {
 			continue
 		}
-		a.latestTS = msg.Ts
 
 		if strings.TrimSpace(msg.Text) == "" {
+			a.latestTS = msg.Ts
 			continue
 		}
 		channelType, isGroup := slackConversationMetadata(a.config.DefaultChannel)
@@ -438,17 +453,17 @@ func (a *SlackAdapter) pollOnceStream(ctx context.Context, handle inputlayer.Str
 		}
 
 		sessionID := ""
-		err := a.sendStreamingMessage(ctx, msg.ThreadTS, func(onChunk func(chunk string)) error {
+		err := a.sendStreamingMessage(ctx, msg.ThreadTS, func(onChunk func(chunk string) error) error {
 			var err error
 			sessionID, err = handle(ctx, sessionID, msg.Text, meta, func(chunk string) error {
-				onChunk(chunk)
-				return nil
+				return onChunk(chunk)
 			})
 			return err
 		})
 		if err != nil {
 			return err
 		}
+		a.latestTS = msg.Ts
 		a.base.MarkActivity()
 		a.append("channel.slack.message", sessionID, map[string]any{
 			"channel":   a.config.DefaultChannel,

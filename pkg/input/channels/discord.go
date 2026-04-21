@@ -6,9 +6,11 @@ import (
 	"crypto/ed25519"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -35,6 +37,8 @@ type discordGatewayPacket struct {
 	D  json.RawMessage `json:"d"`
 }
 
+const discordInteractionTimestampSkew = 5 * time.Minute
+
 func (a *DiscordAdapter) VerifyInteraction(r *http.Request, body []byte) bool {
 	publicKeyHex := strings.TrimSpace(a.config.PublicKey)
 	if publicKeyHex == "" {
@@ -47,6 +51,17 @@ func (a *DiscordAdapter) VerifyInteraction(r *http.Request, body []byte) bool {
 	sigHex := strings.TrimSpace(r.Header.Get("X-Signature-Ed25519"))
 	ts := strings.TrimSpace(r.Header.Get("X-Signature-Timestamp"))
 	if sigHex == "" || ts == "" {
+		return false
+	}
+	timestamp, err := strconv.ParseInt(ts, 10, 64)
+	if err != nil {
+		return false
+	}
+	skew := time.Since(time.Unix(timestamp, 0))
+	if skew < 0 {
+		skew = -skew
+	}
+	if skew > discordInteractionTimestampSkew {
 		return false
 	}
 	sig, err := hex.DecodeString(sigHex)
@@ -347,7 +362,7 @@ func (a *DiscordAdapter) handleGatewayEvent(ctx context.Context, eventType strin
 		if err := json.Unmarshal(raw, &msg); err != nil {
 			return err
 		}
-		if msg.Author.Bot || a.seen(msg.ID) {
+		if msg.Author.Bot || a.hasSeen(msg.ID) {
 			return nil
 		}
 
@@ -378,10 +393,15 @@ func (a *DiscordAdapter) handleGatewayEvent(ctx context.Context, eventType strin
 				return err
 			}
 			_ = respSession
-			return a.sendMessage(ctx, msg.ChannelID, strings.TrimSpace(msg.MessageReference.MessageID), response)
+			if err := a.sendMessage(ctx, msg.ChannelID, strings.TrimSpace(msg.MessageReference.MessageID), response); err != nil {
+				return err
+			}
+			a.markSeen(msg.ID)
+			return nil
 		}
 
 		if strings.TrimSpace(msg.Content) == "" {
+			a.markSeen(msg.ID)
 			return nil
 		}
 
@@ -390,7 +410,11 @@ func (a *DiscordAdapter) handleGatewayEvent(ctx context.Context, eventType strin
 			return err
 		}
 		_ = respSession
-		return a.sendMessage(ctx, msg.ChannelID, strings.TrimSpace(msg.MessageReference.MessageID), response)
+		if err := a.sendMessage(ctx, msg.ChannelID, strings.TrimSpace(msg.MessageReference.MessageID), response); err != nil {
+			return err
+		}
+		a.markSeen(msg.ID)
+		return nil
 	}
 	return nil
 }
@@ -488,10 +512,9 @@ func (a *DiscordAdapter) pollOnce(ctx context.Context, handle inputlayer.Inbound
 
 	for i := len(messages) - 1; i >= 0; i-- {
 		msg := messages[i]
-		if msg.ID == "" || msg.ID == a.latestID || msg.Author.Bot || a.seen(msg.ID) {
+		if msg.ID == "" || msg.ID == a.latestID || msg.Author.Bot || a.hasSeen(msg.ID) {
 			continue
 		}
-		a.latestID = msg.ID
 		targetChannel := strings.TrimSpace(msg.ChannelID)
 		if targetChannel == "" {
 			targetChannel = strings.TrimSpace(a.config.DefaultChannel)
@@ -527,6 +550,8 @@ func (a *DiscordAdapter) pollOnce(ctx context.Context, handle inputlayer.Inbound
 			if err := a.sendMessage(ctx, targetChannel, replyMessageID, response); err != nil {
 				return err
 			}
+			a.latestID = msg.ID
+			a.markSeen(msg.ID)
 			a.base.MarkActivity()
 			a.append("channel.discord.voice", sessionID, map[string]any{
 				"channel":      a.config.DefaultChannel,
@@ -540,6 +565,8 @@ func (a *DiscordAdapter) pollOnce(ctx context.Context, handle inputlayer.Inbound
 		}
 
 		if strings.TrimSpace(msg.Content) == "" {
+			a.latestID = msg.ID
+			a.markSeen(msg.ID)
 			continue
 		}
 
@@ -550,6 +577,8 @@ func (a *DiscordAdapter) pollOnce(ctx context.Context, handle inputlayer.Inbound
 		if err := a.sendMessage(ctx, targetChannel, replyMessageID, response); err != nil {
 			return err
 		}
+		a.latestID = msg.ID
+		a.markSeen(msg.ID)
 		a.base.MarkActivity()
 		a.append("channel.discord.message", sessionID, map[string]any{
 			"channel": a.config.DefaultChannel,
@@ -594,20 +623,37 @@ func (a *DiscordAdapter) append(eventType string, sessionID string, payload map[
 	}
 }
 
-func (a *DiscordAdapter) seen(id string) bool {
+func (a *DiscordAdapter) pruneSeen() {
 	for key, ts := range a.processed {
 		if time.Since(ts) > 30*time.Minute {
 			delete(a.processed, key)
 		}
 	}
-	if _, ok := a.processed[id]; ok {
+}
+
+func (a *DiscordAdapter) hasSeen(id string) bool {
+	a.pruneSeen()
+	_, ok := a.processed[id]
+	return ok
+}
+
+func (a *DiscordAdapter) markSeen(id string) {
+	if strings.TrimSpace(id) == "" {
+		return
+	}
+	a.pruneSeen()
+	a.processed[id] = time.Now().UTC()
+}
+
+func (a *DiscordAdapter) seen(id string) bool {
+	if a.hasSeen(id) {
 		return true
 	}
-	a.processed[id] = time.Now().UTC()
+	a.markSeen(id)
 	return false
 }
 
-func (a *DiscordAdapter) sendStreamingMessage(ctx context.Context, target string, replyMessageID string, streamFn func(onChunk func(chunk string)) error) error {
+func (a *DiscordAdapter) sendStreamingMessage(ctx context.Context, target string, replyMessageID string, streamFn func(onChunk func(chunk string) error) error) error {
 	streamInterval := time.Duration(a.config.StreamInterval) * time.Millisecond
 	if streamInterval <= 0 {
 		streamInterval = 500 * time.Millisecond
@@ -618,7 +664,12 @@ func (a *DiscordAdapter) sendStreamingMessage(ctx context.Context, target string
 		return err
 	}
 	if initialMsgID == "" {
-		return streamWithMessageFallback(streamFn, func(final string) error {
+		return streamWithMessageFallback(func(onChunk func(chunk string)) error {
+			return streamFn(func(chunk string) error {
+				onChunk(chunk)
+				return nil
+			})
+		}, func(final string) error {
 			return a.sendMessage(ctx, target, replyMessageID, final)
 		})
 	}
@@ -627,7 +678,7 @@ func (a *DiscordAdapter) sendStreamingMessage(ctx context.Context, target string
 	var mu sync.Mutex
 	lastEdit := time.Now()
 
-	onChunk := func(chunk string) {
+	onChunk := func(chunk string) error {
 		mu.Lock()
 		accumulated.WriteString(chunk)
 		shouldEdit := time.Since(lastEdit) >= streamInterval
@@ -640,23 +691,27 @@ func (a *DiscordAdapter) sendStreamingMessage(ctx context.Context, target string
 			mu.Lock()
 			text := accumulated.String()
 			mu.Unlock()
-			a.editMessage(ctx, target, initialMsgID, text)
+			if err := a.editMessage(ctx, target, initialMsgID, text); err != nil {
+				return err
+			}
 		}
+		return nil
 	}
 
 	if err := streamFn(onChunk); err != nil {
 		mu.Lock()
 		final := accumulated.String()
 		mu.Unlock()
-		a.editMessage(ctx, target, initialMsgID, final+"\n\n[Error: "+err.Error()+"]")
+		if editErr := a.editMessage(ctx, target, initialMsgID, final+"\n\n[Error: "+err.Error()+"]"); editErr != nil {
+			return errors.Join(err, editErr)
+		}
 		return err
 	}
 
 	mu.Lock()
 	final := accumulated.String()
 	mu.Unlock()
-	a.editMessage(ctx, target, initialMsgID, final)
-	return nil
+	return a.editMessage(ctx, target, initialMsgID, final)
 }
 
 func (a *DiscordAdapter) sendMessageWithResult(ctx context.Context, target string, replyMessageID string, text string) (string, error) {
@@ -716,9 +771,12 @@ func (a *DiscordAdapter) editMessage(ctx context.Context, target string, message
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := a.client.Do(req)
 	if err != nil {
-		return nil
+		return err
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode >= 300 {
+		return fmt.Errorf("discord update failed: %s", resp.Status)
+	}
 	return nil
 }
 
@@ -783,10 +841,11 @@ func (a *DiscordAdapter) handleGatewayEventStream(ctx context.Context, eventType
 		if err := json.Unmarshal(raw, &msg); err != nil {
 			return err
 		}
-		if msg.Author.Bot || a.seen(msg.ID) {
+		if msg.Author.Bot || a.hasSeen(msg.ID) {
 			return nil
 		}
 		if strings.TrimSpace(msg.Content) == "" {
+			a.markSeen(msg.ID)
 			return nil
 		}
 
@@ -805,17 +864,17 @@ func (a *DiscordAdapter) handleGatewayEventStream(ctx context.Context, eventType
 		replyMessageID := strings.TrimSpace(msg.MessageReference.MessageID)
 
 		sessionID := ""
-		err := a.sendStreamingMessage(ctx, msg.ChannelID, replyMessageID, func(onChunk func(chunk string)) error {
+		err := a.sendStreamingMessage(ctx, msg.ChannelID, replyMessageID, func(onChunk func(chunk string) error) error {
 			var err error
 			sessionID, err = handle(ctx, sessionID, msg.Content, meta, func(chunk string) error {
-				onChunk(chunk)
-				return nil
+				return onChunk(chunk)
 			})
 			return err
 		})
 		if err != nil {
 			return err
 		}
+		a.markSeen(msg.ID)
 		a.base.MarkActivity()
 		return nil
 	}
@@ -845,10 +904,9 @@ func (a *DiscordAdapter) pollOnceStream(ctx context.Context, handle inputlayer.S
 
 	for i := len(messages) - 1; i >= 0; i-- {
 		msg := messages[i]
-		if msg.ID == "" || msg.ID == a.latestID || msg.Author.Bot || a.seen(msg.ID) {
+		if msg.ID == "" || msg.ID == a.latestID || msg.Author.Bot || a.hasSeen(msg.ID) {
 			continue
 		}
-		a.latestID = msg.ID
 		targetChannel := strings.TrimSpace(msg.ChannelID)
 		if targetChannel == "" {
 			targetChannel = strings.TrimSpace(a.config.DefaultChannel)
@@ -856,6 +914,8 @@ func (a *DiscordAdapter) pollOnceStream(ctx context.Context, handle inputlayer.S
 		replyMessageID := strings.TrimSpace(msg.MessageReference.MessageID)
 
 		if strings.TrimSpace(msg.Content) == "" {
+			a.latestID = msg.ID
+			a.markSeen(msg.ID)
 			continue
 		}
 
@@ -874,17 +934,18 @@ func (a *DiscordAdapter) pollOnceStream(ctx context.Context, handle inputlayer.S
 
 		sessionID := ""
 
-		err := a.sendStreamingMessage(ctx, targetChannel, replyMessageID, func(onChunk func(chunk string)) error {
+		err := a.sendStreamingMessage(ctx, targetChannel, replyMessageID, func(onChunk func(chunk string) error) error {
 			var err error
 			sessionID, err = handle(ctx, sessionID, msg.Content, meta, func(chunk string) error {
-				onChunk(chunk)
-				return nil
+				return onChunk(chunk)
 			})
 			return err
 		})
 		if err != nil {
 			return err
 		}
+		a.latestID = msg.ID
+		a.markSeen(msg.ID)
 		a.base.MarkActivity()
 		a.append("channel.discord.message", sessionID, map[string]any{
 			"channel":   a.config.DefaultChannel,

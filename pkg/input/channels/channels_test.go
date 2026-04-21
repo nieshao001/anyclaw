@@ -5,9 +5,11 @@ import (
 	"crypto/ed25519"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/1024XEngineer/anyclaw/pkg/config"
 )
@@ -62,7 +64,7 @@ func TestDiscordAdapterVerifyInteraction(t *testing.T) {
 	}
 
 	body := []byte(`{"type":1}`)
-	timestamp := "1710000000"
+	timestamp := fmt.Sprintf("%d", time.Now().Unix())
 	signature := ed25519.Sign(privateKey, append([]byte(timestamp), body...))
 
 	adapter := NewDiscordAdapter(config.DiscordChannelConfig{
@@ -82,6 +84,14 @@ func TestDiscordAdapterVerifyInteraction(t *testing.T) {
 	req.Header.Set("X-Signature-Ed25519", strings.Repeat("0", len(signature)*2))
 	if adapter.VerifyInteraction(req, body) {
 		t.Fatal("expected invalid discord interaction signature to fail verification")
+	}
+
+	staleTimestamp := fmt.Sprintf("%d", time.Now().Add(-10*time.Minute).Unix())
+	staleSignature := ed25519.Sign(privateKey, append([]byte(staleTimestamp), body...))
+	req.Header.Set("X-Signature-Timestamp", staleTimestamp)
+	req.Header.Set("X-Signature-Ed25519", hex.EncodeToString(staleSignature))
+	if adapter.VerifyInteraction(req, body) {
+		t.Fatal("expected stale discord interaction timestamp to fail verification")
 	}
 }
 
