@@ -5,8 +5,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
+	"os"
+	"path"
 	"strconv"
 	"strings"
 	"sync"
@@ -145,6 +148,9 @@ func (a *TelegramAdapter) pollOnce(ctx context.Context, runMessage inputlayer.In
 
 		text := strings.TrimSpace(update.Message.Text)
 		caption := strings.TrimSpace(update.Message.Caption)
+		if text == "" {
+			text = caption
+		}
 		username := update.Message.From.Username
 		userID := strconv.FormatInt(update.Message.From.ID, 10)
 		messageID := strconv.FormatInt(update.UpdateID, 10)
@@ -164,9 +170,11 @@ func (a *TelegramAdapter) pollOnce(ctx context.Context, runMessage inputlayer.In
 		}
 
 		var messageType string
+		var audioURL string
 		var audioRef string
 		var audioFileID string
 		var audioMIME string
+		var cleanupAudio func()
 
 		if update.Message.Voice != nil {
 			messageType = "voice_note"
@@ -175,33 +183,40 @@ func (a *TelegramAdapter) pollOnce(ctx context.Context, runMessage inputlayer.In
 			if audioMIME == "" {
 				audioMIME = "audio/ogg"
 			}
-			fileURL, err := a.getFileURL(ctx, update.Message.Voice.FileID)
+			audioRef = telegramFileRef(audioFileID)
+			localPath, cleanup, err := a.downloadFile(ctx, audioFileID)
 			if err != nil {
 				return err
 			}
-			audioRef = fileURL
+			audioURL = localPath
+			cleanupAudio = cleanup
 		} else if update.Message.Audio != nil {
 			messageType = "audio_file"
 			audioFileID = strings.TrimSpace(update.Message.Audio.FileID)
 			audioMIME = update.Message.Audio.MimeType
-			fileURL, err := a.getFileURL(ctx, update.Message.Audio.FileID)
+			audioRef = telegramFileRef(audioFileID)
+			localPath, cleanup, err := a.downloadFile(ctx, audioFileID)
 			if err != nil {
 				return err
 			}
-			audioRef = fileURL
+			audioURL = localPath
+			cleanupAudio = cleanup
 		} else if update.Message.Document != nil && strings.HasPrefix(update.Message.Document.MimeType, "audio/") {
 			messageType = "audio_file"
 			audioFileID = strings.TrimSpace(update.Message.Document.FileID)
 			audioMIME = update.Message.Document.MimeType
-			fileURL, err := a.getFileURL(ctx, update.Message.Document.FileID)
+			audioRef = telegramFileRef(audioFileID)
+			localPath, cleanup, err := a.downloadFile(ctx, audioFileID)
 			if err != nil {
 				return err
 			}
-			audioRef = fileURL
+			audioURL = localPath
+			cleanupAudio = cleanup
 		}
 
 		if messageType != "" {
 			meta["message_type"] = messageType
+			meta["audio_url"] = audioURL
 			meta["audio_ref"] = audioRef
 			meta["audio_file_id"] = audioFileID
 			meta["audio_mime"] = audioMIME
@@ -209,7 +224,12 @@ func (a *TelegramAdapter) pollOnce(ctx context.Context, runMessage inputlayer.In
 				meta["caption"] = caption
 			}
 
-			sessionID, response, err := runMessage(ctx, "", audioRef, meta)
+			sessionID, response, err := func() (string, string, error) {
+				if cleanupAudio != nil {
+					defer cleanupAudio()
+				}
+				return runMessage(ctx, "", audioURL, meta)
+			}()
 			if err != nil {
 				return err
 			}
@@ -250,13 +270,89 @@ func (a *TelegramAdapter) pollOnce(ctx context.Context, runMessage inputlayer.In
 	return nil
 }
 
-func (a *TelegramAdapter) getFileURL(ctx context.Context, fileID string) (string, error) {
-	_ = ctx
+func telegramFileRef(fileID string) string {
+	fileID = strings.TrimSpace(fileID)
+	if fileID == "" {
+		return ""
+	}
+	return "telegram-file:" + fileID
+}
+
+func (a *TelegramAdapter) resolveFileDownloadURL(ctx context.Context, fileID string) (string, error) {
 	fileID = strings.TrimSpace(fileID)
 	if fileID == "" {
 		return "", fmt.Errorf("telegram: missing file id")
 	}
-	return "telegram-file:" + fileID, nil
+
+	u := fmt.Sprintf("%s/getFile?file_id=%s", a.baseURL, url.QueryEscape(fileID))
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
+	if err != nil {
+		return "", err
+	}
+	resp, err := a.client.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+
+	var result struct {
+		OK          bool   `json:"ok"`
+		Description string `json:"description"`
+		Result      struct {
+			FileID   string `json:"file_id"`
+			FilePath string `json:"file_path"`
+		} `json:"result"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return "", err
+	}
+	if !result.OK || strings.TrimSpace(result.Result.FilePath) == "" {
+		if strings.TrimSpace(result.Description) == "" {
+			return "", fmt.Errorf("telegram: failed to resolve file path for %s", fileID)
+		}
+		return "", fmt.Errorf("telegram: %s", result.Description)
+	}
+	return fmt.Sprintf("https://api.telegram.org/file/bot%s/%s", a.config.BotToken, strings.TrimPrefix(result.Result.FilePath, "/")), nil
+}
+
+func (a *TelegramAdapter) downloadFile(ctx context.Context, fileID string) (string, func(), error) {
+	remoteURL, err := a.resolveFileDownloadURL(ctx, fileID)
+	if err != nil {
+		return "", nil, err
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, remoteURL, nil)
+	if err != nil {
+		return "", nil, err
+	}
+	resp, err := a.client.Do(req)
+	if err != nil {
+		return "", nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 300 {
+		return "", nil, fmt.Errorf("telegram file download failed: %s", resp.Status)
+	}
+
+	suffix := path.Ext(req.URL.Path)
+	tmpFile, err := os.CreateTemp("", "anyclaw-telegram-*"+suffix)
+	if err != nil {
+		return "", nil, err
+	}
+	if _, err := io.Copy(tmpFile, resp.Body); err != nil {
+		tmpFile.Close()
+		_ = os.Remove(tmpFile.Name())
+		return "", nil, err
+	}
+	if err := tmpFile.Close(); err != nil {
+		_ = os.Remove(tmpFile.Name())
+		return "", nil, err
+	}
+
+	cleanup := func() {
+		_ = os.Remove(tmpFile.Name())
+	}
+	return tmpFile.Name(), cleanup, nil
 }
 
 func (a *TelegramAdapter) append(eventType string, sessionID string, payload map[string]any) {
@@ -602,9 +698,11 @@ func (a *TelegramAdapter) pollOnceStream(ctx context.Context, handle inputlayer.
 		}
 
 		var messageType string
+		var audioURL string
 		var audioRef string
 		var audioFileID string
 		var audioMIME string
+		var cleanupAudio func()
 		if update.Message.Voice != nil {
 			messageType = "voice_note"
 			audioFileID = strings.TrimSpace(update.Message.Voice.FileID)
@@ -612,33 +710,40 @@ func (a *TelegramAdapter) pollOnceStream(ctx context.Context, handle inputlayer.
 			if audioMIME == "" {
 				audioMIME = "audio/ogg"
 			}
-			fileURL, err := a.getFileURL(ctx, update.Message.Voice.FileID)
+			audioRef = telegramFileRef(audioFileID)
+			localPath, cleanup, err := a.downloadFile(ctx, audioFileID)
 			if err != nil {
 				return err
 			}
-			audioRef = fileURL
+			audioURL = localPath
+			cleanupAudio = cleanup
 		} else if update.Message.Audio != nil {
 			messageType = "audio_file"
 			audioFileID = strings.TrimSpace(update.Message.Audio.FileID)
 			audioMIME = update.Message.Audio.MimeType
-			fileURL, err := a.getFileURL(ctx, update.Message.Audio.FileID)
+			audioRef = telegramFileRef(audioFileID)
+			localPath, cleanup, err := a.downloadFile(ctx, audioFileID)
 			if err != nil {
 				return err
 			}
-			audioRef = fileURL
+			audioURL = localPath
+			cleanupAudio = cleanup
 		} else if update.Message.Document != nil && strings.HasPrefix(update.Message.Document.MimeType, "audio/") {
 			messageType = "audio_file"
 			audioFileID = strings.TrimSpace(update.Message.Document.FileID)
 			audioMIME = update.Message.Document.MimeType
-			fileURL, err := a.getFileURL(ctx, update.Message.Document.FileID)
+			audioRef = telegramFileRef(audioFileID)
+			localPath, cleanup, err := a.downloadFile(ctx, audioFileID)
 			if err != nil {
 				return err
 			}
-			audioRef = fileURL
+			audioURL = localPath
+			cleanupAudio = cleanup
 		}
 
 		if messageType != "" {
 			meta["message_type"] = messageType
+			meta["audio_url"] = audioURL
 			meta["audio_ref"] = audioRef
 			meta["audio_file_id"] = audioFileID
 			meta["audio_mime"] = audioMIME
@@ -647,10 +752,15 @@ func (a *TelegramAdapter) pollOnceStream(ctx context.Context, handle inputlayer.
 			}
 
 			var response strings.Builder
-			sessionID, err := handle(ctx, "", audioRef, meta, func(chunk string) error {
-				response.WriteString(chunk)
-				return nil
-			})
+			sessionID, err := func() (string, error) {
+				if cleanupAudio != nil {
+					defer cleanupAudio()
+				}
+				return handle(ctx, "", audioURL, meta, func(chunk string) error {
+					response.WriteString(chunk)
+					return nil
+				})
+			}()
 			if err != nil {
 				return err
 			}
