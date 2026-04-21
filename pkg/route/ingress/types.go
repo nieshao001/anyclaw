@@ -12,6 +12,19 @@ type RouteRequest struct {
 	GroupID  string
 }
 
+// SessionRoute describes where an inbound message should land for legacy gateway callers.
+type SessionRoute struct {
+	Key         string `json:"key"`
+	SessionMode string `json:"session_mode"`
+	SessionID   string `json:"session_id,omitempty"`
+	QueueMode   string `json:"queue_mode,omitempty"`
+	ReplyBack   bool   `json:"reply_back,omitempty"`
+	Title       string `json:"title,omitempty"`
+	MatchedRule string `json:"matched_rule,omitempty"`
+	IsThread    bool   `json:"is_thread,omitempty"`
+	ThreadID    string `json:"thread_id,omitempty"`
+}
+
 // MessageActor captures the sender facts needed by the route layer.
 type MessageActor struct {
 	UserID      string
@@ -138,4 +151,66 @@ type SessionStore interface {
 	FindByConversationKey(conversationKey string) (SessionSnapshot, bool, error)
 	BindConversationKey(sessionID string, conversationKey string) (SessionSnapshot, error)
 	Create(opts SessionCreateOptions) (SessionSnapshot, error)
+}
+
+// DeliveryTarget is the M4 output for the final outbound target.
+type DeliveryTarget struct {
+	ChannelID      string
+	ConversationID string
+	ReplyTo        string
+	ThreadID       string
+	TransportMeta  map[string]string
+}
+
+// RouteResolution groups the route decisions for one inbound message.
+type RouteResolution struct {
+	Agent    AgentResolution
+	Session  SessionResolution
+	Delivery DeliveryTarget
+}
+
+// RoutedRequest is the route service output consumed by later layers.
+type RoutedRequest struct {
+	Request MainRouteRequest
+	Route   RouteResolution
+}
+
+// RouteInput is the raw input passed to the route service.
+type RouteInput struct {
+	Entry IngressRoutingEntry
+}
+
+// RouteOutput is the result returned by the current route service stage.
+type RouteOutput struct {
+	Request RoutedRequest
+}
+
+// LegacySessionRoute converts the M3 result back into the legacy session-only contract.
+func (r SessionResolution) LegacySessionRoute() SessionRoute {
+	return SessionRoute{
+		Key:         r.SessionKey,
+		SessionMode: r.SessionMode,
+		SessionID:   r.SessionID,
+		QueueMode:   r.QueueMode,
+		ReplyBack:   r.ReplyBack,
+		Title:       r.TitleHint,
+		MatchedRule: r.MatchedRule,
+		IsThread:    r.ThreadID != "",
+		ThreadID:    r.ThreadID,
+	}
+}
+
+// LegacySessionRoute converts the M2 route decision into the legacy channel session route contract.
+func (d RouteDecision) LegacySessionRoute() SessionRoute {
+	return SessionRoute{
+		Key:         d.RouteKey,
+		SessionMode: d.SessionMode,
+		SessionID:   d.ForcedSessionID,
+		QueueMode:   d.QueueMode,
+		ReplyBack:   d.ReplyBack,
+		Title:       d.TitleHint,
+		MatchedRule: d.MatchedRule,
+		IsThread:    d.ThreadID != "",
+		ThreadID:    d.ThreadID,
+	}
 }
