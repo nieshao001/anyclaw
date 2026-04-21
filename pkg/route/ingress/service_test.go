@@ -10,16 +10,28 @@ import (
 func TestServiceDecideChannelPrefersReplyTargetAsRouteSource(t *testing.T) {
 	service := NewService(NewRouter(config.RoutingConfig{Mode: "per-chat"}))
 
-	decision := service.DecideChannel(ChannelRequest{
+	decision, err := service.DecideChannel(ChannelRequest{
 		Channel:     "telegram",
 		SessionID:   "session-fallback",
 		ReplyTarget: "chat-42",
 		Message:     "hello",
 		ThreadID:    "thread-7",
 	})
+	if err != nil {
+		t.Fatalf("DecideChannel: %v", err)
+	}
 
 	if decision.Key != "telegram:chat-42:thread:thread-7" {
 		t.Fatalf("expected reply target to drive routing key, got %q", decision.Key)
+	}
+}
+
+func TestServiceDecideChannelReturnsProjectorError(t *testing.T) {
+	service := NewService(NewRouter(config.RoutingConfig{Mode: "per-chat"}))
+
+	_, err := service.DecideChannel(ChannelRequest{})
+	if err == nil {
+		t.Fatal("expected DecideChannel to return projector error")
 	}
 }
 
@@ -66,5 +78,22 @@ func TestServiceRouteRunsFullIngressChain(t *testing.T) {
 	}
 	if output.Request.Route.Delivery.TransportMeta["conversation_key"] != "telegram:chat-22" {
 		t.Fatalf("expected delivery metadata conversation_key telegram:chat-22, got %#v", output.Request.Route.Delivery.TransportMeta)
+	}
+}
+
+func TestServiceRouteReturnsContextError(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	service := NewService(NewRouter(config.RoutingConfig{Mode: "per-chat"}))
+	_, err := service.Route(ctx, RouteInput{
+		Entry: IngressRoutingEntry{
+			Scope: MessageScope{
+				ChannelID: "telegram",
+			},
+		},
+	})
+	if err == nil {
+		t.Fatal("expected Route to return context error")
 	}
 }

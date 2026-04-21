@@ -66,25 +66,22 @@ func NewService(router *Router, options ...Option) *Service {
 	return service
 }
 
-// DecideChannel keeps the existing session-only routing behavior for gateway callers.
-func (s *Service) DecideChannel(req ChannelRequest) SessionRoute {
-	if s == nil || s.router == nil {
-		return SessionRoute{}
-	}
-
+// DecideChannel keeps the session-only routing behavior for gateway callers.
+func (s *Service) DecideChannel(req ChannelRequest) (SessionRoute, error) {
 	request, err := s.projector.Project(channelIngressEntryFromRequest(req))
 	if err != nil {
-		return SessionRoute{}
+		return SessionRoute{}, err
 	}
-	return s.router.Decide(routeRequestFromMainRequest(&request)).LegacySessionRoute()
+	return s.router.Decide(routeRequestFromMainRequest(&request)).LegacySessionRoute(), nil
 }
 
 // Route executes the ingress route chain: M1 projector, M2 agent resolution, M3 session resolution, and M4 delivery resolution.
 func (s *Service) Route(ctx context.Context, input RouteInput) (RouteOutput, error) {
-	_ = ctx
-
 	if s == nil {
 		return RouteOutput{}, fmt.Errorf("ingress route service is nil")
+	}
+	if err := ctx.Err(); err != nil {
+		return RouteOutput{}, err
 	}
 
 	request, err := s.projector.Project(input.Entry)
@@ -122,7 +119,6 @@ func channelIngressEntryFromRequest(req ChannelRequest) IngressRoutingEntry {
 	return IngressRoutingEntry{
 		Text: req.Message,
 		Scope: MessageScope{
-			EntryPoint:     "channel",
 			ChannelID:      strings.TrimSpace(req.Channel),
 			ConversationID: routeSource,
 			ThreadID:       strings.TrimSpace(req.ThreadID),
