@@ -1,5 +1,7 @@
 package desktop
 
+import "context"
+
 const DesktopProtocolVersion = "anyclaw.app.desktop.v1"
 
 type DesktopSpec struct {
@@ -123,12 +125,12 @@ type VerificationResult struct {
 }
 
 type AppConnector interface {
-	Probe(ctx interface{}) (*ProbeResult, error)
-	Bootstrap(ctx interface{}) error
-	Execute(ctx interface{}, action string, params map[string]any) (map[string]any, error)
-	Verify(ctx interface{}, spec *VerificationSpec) (*VerificationResult, error)
-	Resume(ctx interface{}, state *ResumeState) error
-	Cleanup(ctx interface{}, spec *CleanupSpec) error
+	Probe(ctx context.Context) (*ProbeResult, error)
+	Bootstrap(ctx context.Context) error
+	Execute(ctx context.Context, action string, params map[string]any) (map[string]any, error)
+	Verify(ctx context.Context, spec *VerificationSpec) (*VerificationResult, error)
+	Resume(ctx context.Context, state *ResumeState) error
+	Cleanup(ctx context.Context, spec *CleanupSpec) error
 	GetCapabilities() []string
 	GetActions() []string
 }
