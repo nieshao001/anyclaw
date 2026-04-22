@@ -1,8 +1,9 @@
-import { Navigate, createHashRouter } from "react-router-dom";
+import { createHashRouter } from "react-router-dom";
 
 import { AppShell } from "@/layouts/AppShell/AppShell";
 import { DiscoveryPage } from "@/pages/Discovery/DiscoveryPage";
 import { MarketPage } from "@/pages/Market/MarketPage";
+import { ChatHomePage } from "@/pages/ChatHome/ChatHomePage";
 import { StudioPage } from "@/pages/Studio/StudioPage";
 import { WorkspacePage } from "@/pages/Workspace/WorkspacePage";
 
@@ -12,7 +13,7 @@ export const router = createHashRouter([
     path: "/",
     children: [
       {
-        element: <Navigate replace to="/workspace" />,
+        element: <ChatHomePage />,
         index: true,
       },
       {

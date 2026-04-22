@@ -1,10 +1,11 @@
-import { Compass, LayoutDashboard, Settings, Store, Wrench } from "lucide-react";
+import { Compass, LayoutDashboard, MessageSquare, Settings, Store, Wrench } from "lucide-react";
 import { NavLink } from "react-router-dom";
 
 import { useShellStore } from "@/features/shell/useShellStore";
 import { useWorkspaceOverview } from "@/features/workspace/useWorkspaceOverview";
 
 const navItems = [
+  { icon: MessageSquare, label: "对话", to: "/" },
   { icon: LayoutDashboard, label: "总览", to: "/workspace" },
   { icon: Store, label: "市场", to: "/market" },
   { icon: Compass, label: "发现", to: "/discovery" },

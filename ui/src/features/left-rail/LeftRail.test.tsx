@@ -14,8 +14,10 @@ vi.mock("@/features/workspace/useWorkspaceOverview", () => ({
 
 const useWorkspaceOverviewMock = vi.mocked(useWorkspaceOverview);
 
-function Wrapper({ children }: PropsWithChildren) {
-  return <MemoryRouter initialEntries={["/market"]}>{children}</MemoryRouter>;
+function createWrapper(initialEntries: string[]) {
+  return function Wrapper({ children }: PropsWithChildren) {
+    return <MemoryRouter initialEntries={initialEntries}>{children}</MemoryRouter>;
+  };
 }
 
 describe("LeftRail", () => {
@@ -37,19 +39,27 @@ describe("LeftRail", () => {
   });
 
   it("highlights the active route and shows the workspace avatar letter", () => {
-    render(<LeftRail />, { wrapper: Wrapper });
+    render(<LeftRail />, { wrapper: createWrapper(["/market"]) });
 
     expect(screen.getByRole("link", { name: "市场" })).toHaveAttribute("aria-current", "page");
     expect(screen.getByRole("link", { name: "总览" })).not.toHaveAttribute("aria-current", "page");
+    expect(screen.getByRole("link", { name: "对话" })).toBeInTheDocument();
     expect(screen.getByText("B")).toBeInTheDocument();
   });
 
   it("opens general settings from the footer action", () => {
-    render(<LeftRail />, { wrapper: Wrapper });
+    render(<LeftRail />, { wrapper: createWrapper(["/market"]) });
 
     fireEvent.click(screen.getByRole("button", { name: "打开设置" }));
 
     expect(useShellStore.getState().settingsOpen).toBe(true);
     expect(useShellStore.getState().settingsSection).toBe("general");
+  });
+
+  it("marks the chat entry active on the home route", () => {
+    render(<LeftRail />, { wrapper: createWrapper(["/"]) });
+
+    expect(screen.getByRole("link", { name: "对话" })).toHaveAttribute("aria-current", "page");
+    expect(screen.getByRole("link", { name: "总览" })).not.toHaveAttribute("aria-current", "page");
   });
 });
