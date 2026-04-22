@@ -1,7 +1,9 @@
 package schedule
 
 import (
+	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -56,5 +58,53 @@ func TestFilePersisterRoundTrip(t *testing.T) {
 
 	if _, err := NewFilePersister(filepath.Join(t.TempDir(), "nested", "scheduler")); err != nil {
 		t.Fatalf("NewFilePersister nested failed: %v", err)
+	}
+}
+
+func TestFilePersisterMissingAndInvalidFiles(t *testing.T) {
+	persister, err := NewFilePersister(t.TempDir())
+	if err != nil {
+		t.Fatalf("NewFilePersister failed: %v", err)
+	}
+
+	tasks, err := persister.LoadTasks()
+	if err != nil {
+		t.Fatalf("LoadTasks on missing file failed: %v", err)
+	}
+	if len(tasks) != 0 {
+		t.Fatalf("expected no tasks for missing file, got %+v", tasks)
+	}
+
+	invalidTasksPath := filepath.Join(persister.tasksDir, "tasks.json")
+	if err := os.WriteFile(invalidTasksPath, []byte("{"), 0o644); err != nil {
+		t.Fatalf("write invalid tasks json: %v", err)
+	}
+	if _, err := persister.LoadTasks(); err == nil {
+		t.Fatal("expected invalid tasks json to fail")
+	}
+}
+
+func TestReadAndWriteJSONFileEdgeCases(t *testing.T) {
+	tempDir := t.TempDir()
+	emptyPath := filepath.Join(tempDir, "empty.json")
+	if err := os.WriteFile(emptyPath, []byte{}, 0o644); err != nil {
+		t.Fatalf("write empty json file: %v", err)
+	}
+
+	var tasks []*Task
+	if err := readJSONFile(emptyPath, &tasks); err != nil {
+		t.Fatalf("readJSONFile on empty file failed: %v", err)
+	}
+
+	missingDirPath := filepath.Join(tempDir, "missing", "tasks.json")
+	if err := writeJSONFile(missingDirPath, map[string]string{"a": "b"}); err == nil {
+		t.Fatal("expected writeJSONFile to fail when parent dir is missing")
+	}
+
+	type badJSON struct {
+		Ch chan int `json:"ch"`
+	}
+	if err := writeJSONFile(filepath.Join(tempDir, "bad.json"), badJSON{Ch: make(chan int)}); err == nil || !strings.Contains(err.Error(), "unsupported type") {
+		t.Fatalf("expected marshal failure for unsupported JSON value, got %v", err)
 	}
 }

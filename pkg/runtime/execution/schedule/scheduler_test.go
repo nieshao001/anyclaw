@@ -353,3 +353,103 @@ func TestSchedulerRecordsPersistenceErrorFromRunSnapshots(t *testing.T) {
 		t.Fatalf("expected last persistence error to be recorded, got %v", err)
 	}
 }
+
+func TestSchedulerUtilityPathsAndErrors(t *testing.T) {
+	if _, _, err := ParseSchedule("bad cron"); err == nil {
+		t.Fatal("expected invalid ParseSchedule input to fail")
+	}
+
+	schedule, kind, err := ParseSchedule("@every 30s")
+	if err != nil {
+		t.Fatalf("ParseSchedule(@every) failed: %v", err)
+	}
+	if kind != "interval" || schedule != "@every 30s" {
+		t.Fatalf("unexpected interval schedule parse: schedule=%q kind=%q", schedule, kind)
+	}
+
+	schedule, kind, err = ParseSchedule("@hourly")
+	if err != nil {
+		t.Fatalf("ParseSchedule(@hourly) failed: %v", err)
+	}
+	if kind != "standard" || schedule != "0 * * * *" {
+		t.Fatalf("unexpected standard schedule parse: schedule=%q kind=%q", schedule, kind)
+	}
+
+	task := &Task{Name: "bad-zone", Schedule: "@hourly", Command: "echo", Enabled: true, Timezone: "No/SuchZone"}
+	if _, err := nextRunTimesForTask(task, time.Now().UTC(), 1); err == nil {
+		t.Fatal("expected invalid timezone to fail")
+	}
+
+	if delay := calculateRetryDelay(2, "exponential"); delay != 4*time.Second {
+		t.Fatalf("unexpected exponential retry delay: %s", delay)
+	}
+	if delay := calculateRetryDelay(2, "linear"); delay != 3*time.Second {
+		t.Fatalf("unexpected linear retry delay: %s", delay)
+	}
+	if delay := calculateRetryDelay(2, "fixed"); delay != 2*time.Second {
+		t.Fatalf("unexpected default retry delay: %s", delay)
+	}
+}
+
+func TestSchedulerEnableDisableClearHistoryAndCancelErrors(t *testing.T) {
+	scheduler := New()
+	taskID, err := scheduler.AddTask(&Task{
+		Name:     "managed",
+		Schedule: "@hourly",
+		Command:  "echo",
+		Enabled:  true,
+	})
+	if err != nil {
+		t.Fatalf("AddTask failed: %v", err)
+	}
+
+	if err := scheduler.DisableTask(taskID); err != nil {
+		t.Fatalf("DisableTask failed: %v", err)
+	}
+	task, _ := scheduler.GetTask(taskID)
+	if task.Enabled || task.NextRun != nil {
+		t.Fatalf("expected disabled task with nil next run, got %+v", task)
+	}
+
+	if err := scheduler.EnableTask(taskID); err != nil {
+		t.Fatalf("EnableTask failed: %v", err)
+	}
+	task, _ = scheduler.GetTask(taskID)
+	if !task.Enabled || task.NextRun == nil {
+		t.Fatalf("expected enabled task with next run, got %+v", task)
+	}
+
+	scheduler.mu.Lock()
+	scheduler.taskRuns[taskID] = []*TaskRun{{ID: "run-1", TaskID: taskID, Status: "success", StartTime: time.Now().UTC()}}
+	scheduler.mu.Unlock()
+	if err := scheduler.ClearHistory(taskID); err != nil {
+		t.Fatalf("ClearHistory failed: %v", err)
+	}
+	if runs := scheduler.GetTaskRuns(taskID); len(runs) != 0 {
+		t.Fatalf("expected cleared history, got %+v", runs)
+	}
+
+	if err := scheduler.CancelRun("missing"); err == nil {
+		t.Fatal("expected missing run cancel to fail")
+	}
+	if err := scheduler.ClearHistory("missing-task"); err == nil {
+		t.Fatal("expected missing task history clear to fail")
+	}
+}
+
+func TestSchedulerPersistenceErrorsOnTaskOperations(t *testing.T) {
+	scheduler := New()
+	scheduler.SetPersister(&failingPersister{saveTasksErr: errors.New("cannot save tasks")})
+
+	if _, err := scheduler.AddTask(&Task{
+		Name:     "persist-add",
+		Schedule: "@hourly",
+		Command:  "echo",
+		Enabled:  true,
+	}); err == nil {
+		t.Fatal("expected AddTask persistence failure")
+	}
+	if err := scheduler.LastPersistenceError(); err == nil || err.Error() != "cannot save tasks" {
+		t.Fatalf("expected add persistence error to be recorded, got %v", err)
+	}
+}
