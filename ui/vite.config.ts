@@ -108,6 +108,7 @@ export default defineConfig({
     host: "127.0.0.1",
     port: 4173,
     proxy: {
+      "/channel": apiTarget,
       "/approvals": apiTarget,
       "/agents": apiTarget,
       "/channels": apiTarget,

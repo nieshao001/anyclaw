@@ -1,6 +1,7 @@
 import { createHashRouter } from "react-router-dom";
 
 import { AppShell } from "@/layouts/AppShell/AppShell";
+import { ChannelsPage } from "@/pages/Channels/ChannelsPage";
 import { DiscoveryPage } from "@/pages/Discovery/DiscoveryPage";
 import { MarketPage } from "@/pages/Market/MarketPage";
 import { ChatHomePage } from "@/pages/ChatHome/ChatHomePage";
@@ -23,6 +24,10 @@ export const router = createHashRouter([
       {
         element: <MarketPage />,
         path: "market",
+      },
+      {
+        element: <ChannelsPage />,
+        path: "channels",
       },
       {
         element: <DiscoveryPage />,

@@ -44,6 +44,7 @@ describe("LeftRail", () => {
     expect(screen.getByRole("link", { name: "市场" })).toHaveAttribute("aria-current", "page");
     expect(screen.getByRole("link", { name: "总览" })).not.toHaveAttribute("aria-current", "page");
     expect(screen.getByRole("link", { name: "对话" })).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "渠道" })).toBeInTheDocument();
     expect(screen.getByText("B")).toBeInTheDocument();
   });
 
@@ -61,5 +62,12 @@ describe("LeftRail", () => {
 
     expect(screen.getByRole("link", { name: "对话" })).toHaveAttribute("aria-current", "page");
     expect(screen.getByRole("link", { name: "总览" })).not.toHaveAttribute("aria-current", "page");
+  });
+
+  it("marks the channels entry active on the channels route", () => {
+    render(<LeftRail />, { wrapper: createWrapper(["/channels"]) });
+
+    expect(screen.getByRole("link", { name: "渠道" })).toHaveAttribute("aria-current", "page");
+    expect(screen.getByRole("link", { name: "市场" })).not.toHaveAttribute("aria-current", "page");
   });
 });
