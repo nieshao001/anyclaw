@@ -2,6 +2,7 @@ package tools
 
 import (
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -91,5 +92,67 @@ func TestPolicyEngineBlocksPluginNetOutWithoutAllowedDomain(t *testing.T) {
 
 	if err := policy.ValidatePluginPermissions("demo-plugin", []string{"tool:exec", "net:out"}); err == nil {
 		t.Fatal("expected net:out plugin permission to be denied without egress allowlist")
+	}
+}
+
+func TestPrivacyEngineClassifyAndCommandChecks(t *testing.T) {
+	engine := NewPrivacyEngine(PrivacyOptions{
+		AllowedEgressDomains: []string{"example.com"},
+		BlockedEgressDomains: []string{"blocked.com"},
+	})
+
+	if got := engine.ClassifyPath(`C:\Users\demo\.ssh\id_rsa`); got != PrivacyDomainKeys {
+		t.Fatalf("expected SSH path to map to keys domain, got %v", got)
+	}
+	result := engine.CheckPath(`C:\Users\demo\Documents\Personal\notes.txt`)
+	if result.IsAllowed || !result.RequiresApproval || result.Domain != PrivacyDomainDocuments {
+		t.Fatalf("unexpected privacy check result: %#v", result)
+	}
+	if allowed, reason := engine.CheckCommand("rm -rf /tmp/demo"); allowed || !strings.Contains(reason, "dangerous command pattern") {
+		t.Fatalf("expected dangerous command detection, got allowed=%v reason=%q", allowed, reason)
+	}
+}
+
+func TestPrivacyEngineEgressChecks(t *testing.T) {
+	engine := NewPrivacyEngine(PrivacyOptions{
+		AllowedEgressDomains: []string{"example.com"},
+		BlockedEgressDomains: []string{"blocked.com"},
+	})
+
+	allowed := engine.CheckEgress("https://api.example.com/v1")
+	if !allowed.IsAllowed {
+		t.Fatalf("expected allowlisted egress to pass, got %#v", allowed)
+	}
+	blocked := engine.CheckEgress("https://blocked.com")
+	if blocked.IsAllowed || !blocked.RequiresApproval {
+		t.Fatalf("expected blocked egress to be denied, got %#v", blocked)
+	}
+	local := engine.CheckEgress("http://127.0.0.1:8080")
+	if !local.IsAllowed {
+		t.Fatalf("expected local egress to be allowed, got %#v", local)
+	}
+}
+
+func TestPolicyHelpersNormalizeDomainsAndPaths(t *testing.T) {
+	workspace := t.TempDir()
+	paths := normalizePolicyPaths([]string{"logs", "logs"}, workspace)
+	if len(paths) != 1 {
+		t.Fatalf("expected deduplicated normalized paths, got %#v", paths)
+	}
+	domains := normalizePolicyDomains([]string{"https://Example.com/api", "example.com", "*.demo.com/"})
+	if len(domains) != 2 {
+		t.Fatalf("expected deduplicated normalized domains, got %#v", domains)
+	}
+	if !domainMatches("api.demo.com", "*.demo.com") {
+		t.Fatal("expected wildcard domain to match")
+	}
+	if domainMatches("demo.org", "example.com") {
+		t.Fatal("expected unrelated domain to not match")
+	}
+	if !isLocalEgressHost("192.168.1.2") || isLocalEgressHost("example.com") {
+		t.Fatal("unexpected local egress host detection result")
+	}
+	if normalizePolicyArtifactPath("notes.txt", workspace) != filepath.Join(workspace, "notes.txt") {
+		t.Fatal("expected relative artifact path to resolve against working dir")
 	}
 }

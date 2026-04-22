@@ -241,6 +241,165 @@ func TestQMDInsertGeneratesUniqueIDs(t *testing.T) {
 	}
 }
 
+func TestBuiltinPathAndCommandHelpers(t *testing.T) {
+	workspace := t.TempDir()
+	protected := filepath.Join(workspace, "secret")
+	allowed := filepath.Join(protected, "public")
+
+	if err := validateProtectedPath(filepath.Join(protected, "a.txt"), []string{protected}); err == nil {
+		t.Fatal("expected protected path validation failure")
+	}
+	if err := validateCommandAgainstProtectedPaths("cat "+filepath.Join(protected, "a.txt"), []string{protected}, nil); err == nil {
+		t.Fatal("expected command to be rejected for protected path reference")
+	}
+	if !isProtectedPathExplicitlyAllowed(protected, []string{allowed}) {
+		t.Fatal("expected nested allowed path to mark protected path as explicitly allowed")
+	}
+	if merged := mergePathLists(workspace, []string{allowed}, []string{""}); len(merged) < 2 {
+		t.Fatalf("expected merged path list, got %#v", merged)
+	}
+	if !pathWithin(filepath.Join(workspace, "sub"), workspace) {
+		t.Fatal("expected child path to be within workspace")
+	}
+	if normalizeCommandForCompare(`C:\Users\Test`) != "c:/users/test" {
+		t.Fatal("expected normalized command slashes")
+	}
+	if tokens := protectedPathTokens(filepath.Join(protected, "Documents")); len(tokens) == 0 {
+		t.Fatal("expected protected path tokens to be generated")
+	}
+}
+
+func TestBuiltinGeneralHelpers(t *testing.T) {
+	if got := resolvePath("notes.txt", filepath.Join("tmp", "work")); !strings.HasSuffix(got, filepath.Join("tmp", "work", "notes.txt")) {
+		t.Fatalf("unexpected resolved path %q", got)
+	}
+	if !isImageFile("demo.PNG") {
+		t.Fatal("expected image extension detection")
+	}
+	if firstNonEmptyCommandCwd("", " ", "here") != "here" {
+		t.Fatal("expected first non-empty cwd")
+	}
+	if normalizeShellName(" PwSh ") != "pwsh" {
+		t.Fatal("expected normalized shell name")
+	}
+	if !isDangerousCommand("rm -rf /tmp/demo", []string{"rm -rf"}) {
+		t.Fatal("expected dangerous command detection")
+	}
+}
+
+func TestEnsureWriteAllowedModes(t *testing.T) {
+	workspace := t.TempDir()
+	if err := ensureWriteAllowed(filepath.Join(workspace, "file.txt"), workspace, "limited"); err != nil {
+		t.Fatalf("expected limited write inside workspace, got %v", err)
+	}
+	if err := ensureWriteAllowed(filepath.Join(t.TempDir(), "file.txt"), workspace, "limited"); err == nil {
+		t.Fatal("expected limited write outside workspace to be denied")
+	}
+	if err := ensureWriteAllowed(filepath.Join(workspace, "file.txt"), workspace, "read-only"); err == nil {
+		t.Fatal("expected read-only write to be denied")
+	}
+}
+
+func TestGetTimeToolAndReviewCommandExecution(t *testing.T) {
+	result, err := GetTimeTool(context.Background(), map[string]any{"format": "2006"})
+	if err != nil || len(strings.TrimSpace(result)) != 4 {
+		t.Fatalf("GetTimeTool returned %q, %v", result, err)
+	}
+
+	workspace := t.TempDir()
+	protected := filepath.Join(workspace, "private")
+	if err := os.MkdirAll(protected, 0o755); err != nil {
+		t.Fatalf("mkdir protected: %v", err)
+	}
+	err = reviewCommandExecution("cat "+filepath.Join(protected, "x.txt"), "", BuiltinOptions{
+		ExecutionMode: "host-reviewed",
+		ProtectedPaths: []string{
+			protected,
+		},
+	})
+	if err == nil {
+		t.Fatal("expected protected path command review failure")
+	}
+}
+
+func TestFileBuiltinTools(t *testing.T) {
+	workspace := t.TempDir()
+	target := filepath.Join(workspace, "docs", "note.txt")
+
+	if _, err := WriteFileTool(context.Background(), map[string]any{
+		"path":    target,
+		"content": "hello world",
+	}); err != nil {
+		t.Fatalf("WriteFileTool: %v", err)
+	}
+
+	read, err := ReadFileTool(context.Background(), map[string]any{"path": target})
+	if err != nil {
+		t.Fatalf("ReadFileTool: %v", err)
+	}
+	if read != "hello world" {
+		t.Fatalf("unexpected file contents: %q", read)
+	}
+
+	dirJSON, err := ListDirectoryToolWithCwd(context.Background(), map[string]any{"path": filepath.Dir(target)}, workspace)
+	if err != nil {
+		t.Fatalf("ListDirectoryToolWithCwd: %v", err)
+	}
+	if !strings.Contains(dirJSON, "note.txt") {
+		t.Fatalf("expected directory listing to include note.txt, got %q", dirJSON)
+	}
+
+	searchJSON, err := SearchFilesToolWithCwd(context.Background(), map[string]any{
+		"path":    workspace,
+		"pattern": "*.txt",
+	}, workspace)
+	if err != nil {
+		t.Fatalf("SearchFilesToolWithCwd: %v", err)
+	}
+	if !strings.Contains(searchJSON, "note.txt") {
+		t.Fatalf("expected search results to include note.txt, got %q", searchJSON)
+	}
+
+	rootList, err := ListDirectoryTool(context.Background(), map[string]any{"path": workspace})
+	if err != nil {
+		t.Fatalf("ListDirectoryTool: %v", err)
+	}
+	if !strings.Contains(rootList, "docs/") {
+		t.Fatalf("expected root listing to include docs directory, got %q", rootList)
+	}
+
+	searchViaWrapper, err := SearchFilesTool(context.Background(), map[string]any{
+		"path":    workspace,
+		"pattern": "*.txt",
+	})
+	if err != nil {
+		t.Fatalf("SearchFilesTool: %v", err)
+	}
+	if !strings.Contains(searchViaWrapper, "note.txt") {
+		t.Fatalf("expected wrapper search results to include note.txt, got %q", searchViaWrapper)
+	}
+}
+
+func TestRunCommandAndShellHelpers(t *testing.T) {
+	output, err := RunCommandToolWithPolicy(context.Background(), map[string]any{"command": "echo hello"}, BuiltinOptions{
+		ExecutionMode: "host-reviewed",
+	})
+	if err != nil {
+		t.Fatalf("RunCommandToolWithPolicy: %v", err)
+	}
+	if !strings.Contains(strings.ToLower(output), "hello") {
+		t.Fatalf("expected command output to contain hello, got %q", output)
+	}
+
+	cmd := shellCommand(context.Background(), "echo hello")
+	if cmd == nil {
+		t.Fatal("expected shellCommand to return a command")
+	}
+	if exe, err := findShellExecutable("go"); err != nil || !strings.HasSuffix(strings.ToLower(exe), "go.exe") && !strings.HasSuffix(strings.ToLower(exe), "/go") {
+		t.Fatalf("findShellExecutable returned %q, %v", exe, err)
+	}
+}
+
 type stubQMDClient struct {
 	insertedIDs []string
 }

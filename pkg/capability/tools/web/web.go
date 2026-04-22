@@ -9,7 +9,7 @@ import (
 	"time"
 )
 
-const searchEndpoint = "https://ddg-api.vercel.app/search"
+var searchEndpoint = "https://ddg-api.vercel.app/search"
 
 type SearchResult struct {
 	Title       string
