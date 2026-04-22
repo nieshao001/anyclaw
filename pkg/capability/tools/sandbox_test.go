@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -107,5 +108,62 @@ func TestEnsureLocalSandboxUsesDefaultBaseDir(t *testing.T) {
 	expectedPrefix := filepath.Join(workingDir, ".anyclaw", "sandboxes")
 	if !strings.HasPrefix(root, expectedPrefix) {
 		t.Fatalf("expected default sandbox root under %q, got %q", expectedPrefix, root)
+	}
+}
+
+func TestSandboxManagerResolveExecutionDocker(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("docker sandbox stub uses a Windows batch shim in this environment")
+	}
+
+	toolDir := t.TempDir()
+	dockerShim := filepath.Join(toolDir, "docker.cmd")
+	script := "@echo off\r\n" +
+		"if \"%1\"==\"inspect\" exit /b 1\r\n" +
+		"if \"%1\"==\"run\" (\r\n" +
+		"  echo started\r\n" +
+		"  exit /b 0\r\n" +
+		")\r\n" +
+		"if \"%1\"==\"exec\" (\r\n" +
+		"  echo exec-ok\r\n" +
+		"  exit /b 0\r\n" +
+		")\r\n" +
+		"exit /b 0\r\n"
+	if err := os.WriteFile(dockerShim, []byte(script), 0o755); err != nil {
+		t.Fatalf("write docker shim: %v", err)
+	}
+
+	originalPath := os.Getenv("PATH")
+	if err := os.Setenv("PATH", toolDir+";"+originalPath); err != nil {
+		t.Fatalf("set PATH: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = os.Setenv("PATH", originalPath)
+	})
+
+	manager := NewSandboxManager(config.SandboxConfig{
+		Enabled: true,
+		Backend: "docker",
+	}, t.TempDir())
+	ctx := WithSandboxScope(context.Background(), SandboxScope{SessionID: "sess", Channel: "room"})
+
+	cwd, factory, err := manager.ResolveExecution(ctx, "")
+	if err != nil {
+		t.Fatalf("ResolveExecution docker: %v", err)
+	}
+	if cwd != "/workspace" || factory == nil {
+		t.Fatalf("expected docker cwd/factory, got cwd=%q factory=%v", cwd, factory != nil)
+	}
+
+	cmd, err := factory(context.Background(), "echo hi")
+	if err != nil {
+		t.Fatalf("docker factory: %v", err)
+	}
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("docker exec shim failed: %v", err)
+	}
+	if !strings.Contains(strings.ToLower(string(output)), "exec-ok") {
+		t.Fatalf("unexpected docker exec shim output: %q", string(output))
 	}
 }

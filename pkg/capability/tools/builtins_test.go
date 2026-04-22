@@ -400,6 +400,55 @@ func TestRunCommandAndShellHelpers(t *testing.T) {
 	}
 }
 
+func TestBuiltinWrapperAndPolicyHelpers(t *testing.T) {
+	workspace := t.TempDir()
+	filePath := filepath.Join(workspace, "a.txt")
+	if err := os.WriteFile(filePath, []byte("hello"), 0o644); err != nil {
+		t.Fatalf("write file: %v", err)
+	}
+
+	policy := NewPolicyEngine(PolicyOptions{
+		WorkingDir:       workspace,
+		AllowedReadPaths: []string{workspace},
+	})
+
+	if got, err := ReadFileToolWithPolicy(context.Background(), map[string]any{"path": filePath}, workspace, BuiltinOptions{Policy: policy}); err != nil || got != "hello" {
+		t.Fatalf("ReadFileToolWithPolicy returned %q, %v", got, err)
+	}
+
+	list, err := ListDirectoryToolWithPolicy(context.Background(), map[string]any{"path": workspace}, workspace, BuiltinOptions{Policy: policy})
+	if err != nil || !strings.Contains(list, "a.txt") {
+		t.Fatalf("ListDirectoryToolWithPolicy returned %q, %v", list, err)
+	}
+
+	search, err := SearchFilesToolWithPolicy(context.Background(), map[string]any{"path": workspace, "pattern": "*.txt"}, workspace, BuiltinOptions{Policy: policy})
+	if err != nil || !strings.Contains(search, "a.txt") {
+		t.Fatalf("SearchFilesToolWithPolicy returned %q, %v", search, err)
+	}
+
+	if _, err := RunCommandTool(context.Background(), map[string]any{}); err == nil {
+		t.Fatal("expected RunCommandTool missing command error")
+	}
+	if _, err := WebSearchTool(context.Background(), map[string]any{}); err == nil {
+		t.Fatal("expected WebSearchTool missing query error")
+	}
+	if _, err := FetchURLTool(context.Background(), map[string]any{}); err == nil {
+		t.Fatal("expected FetchURLTool missing url error")
+	}
+}
+
+func TestReadFileToolWithCwdRejectsImageInput(t *testing.T) {
+	workspace := t.TempDir()
+	imagePath := filepath.Join(workspace, "shot.png")
+	if err := os.WriteFile(imagePath, []byte("png"), 0o644); err != nil {
+		t.Fatalf("write image: %v", err)
+	}
+
+	if _, err := ReadFileToolWithCwd(context.Background(), map[string]any{"path": imagePath}, workspace); err == nil {
+		t.Fatal("expected image input to be rejected")
+	}
+}
+
 type stubQMDClient struct {
 	insertedIDs []string
 }

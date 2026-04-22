@@ -156,3 +156,47 @@ func TestPolicyHelpersNormalizeDomainsAndPaths(t *testing.T) {
 		t.Fatal("expected relative artifact path to resolve against working dir")
 	}
 }
+
+func TestPrivacyDomainStringAndEvaluateDomain(t *testing.T) {
+	engine := NewPrivacyEngine(PrivacyOptions{})
+	cases := []struct {
+		domain  PrivacyDomain
+		name    string
+		allowed bool
+	}{
+		{PrivacyDomainNone, "none", true},
+		{PrivacyDomainBrowser, "browser", false},
+		{PrivacyDomainChat, "chat", false},
+		{PrivacyDomainCredentials, "credentials", false},
+		{PrivacyDomainKeys, "keys", false},
+		{PrivacyDomainDocuments, "documents", false},
+		{PrivacyDomainMedia, "media", false},
+		{PrivacyDomainSystem, "system", false},
+		{PrivacyDomainNetwork, "network", true},
+		{PrivacyDomain(999), "unknown", false},
+	}
+
+	for _, tc := range cases {
+		if got := tc.domain.String(); got != tc.name {
+			t.Fatalf("unexpected domain name for %v: %q", tc.domain, got)
+		}
+		if tc.domain == PrivacyDomain(999) {
+			continue
+		}
+		result := engine.evaluateDomain(tc.domain, "demo")
+		if result.DomainName != tc.name {
+			t.Fatalf("unexpected domain name in result for %v: %#v", tc.domain, result)
+		}
+		if result.IsAllowed != tc.allowed {
+			t.Fatalf("unexpected allow decision for %v: %#v", tc.domain, result)
+		}
+	}
+}
+
+func TestPrivacyEngineCheckEgressInvalidURL(t *testing.T) {
+	engine := NewPrivacyEngine(PrivacyOptions{})
+	result := engine.CheckEgress("://bad")
+	if result.IsAllowed || !strings.Contains(result.Reason, "invalid URL") {
+		t.Fatalf("expected invalid URL to be denied, got %#v", result)
+	}
+}
