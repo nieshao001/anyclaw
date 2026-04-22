@@ -12,6 +12,8 @@ import (
 )
 
 func TestConvertMarkdownToSkillJSONUsesDetailFallbacks(t *testing.T) {
+	t.Parallel()
+
 	detail := &SkillDetail{
 		Description: "Remote skill description",
 		Version:     "2.3.4",
@@ -52,6 +54,8 @@ func TestConvertMarkdownToSkillJSONUsesDetailFallbacks(t *testing.T) {
 }
 
 func TestSearchSkillhubCatalogUsesUnifiedInstallHint(t *testing.T) {
+	t.Parallel()
+
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte(`{"results":[{"displayName":"Weather Helper","slug":"weather","summary":"Forecast support","version":"1.2.3"}]}`))
 	}))
@@ -76,6 +80,8 @@ func TestSearchSkillhubCatalogUsesUnifiedInstallHint(t *testing.T) {
 }
 
 func TestConvertSkillhubToSkillJSONWritesExpectedFile(t *testing.T) {
+	t.Parallel()
+
 	dir := t.TempDir()
 	content := `---
 name: travel_helper
@@ -117,6 +123,8 @@ Highlight trade-offs.
 }
 
 func TestPathWithinBaseRejectsPrefixLookalikes(t *testing.T) {
+	t.Parallel()
+
 	baseDir := filepath.Join(t.TempDir(), "skills")
 	inside := filepath.Join(baseDir, "weather", "skill.json")
 	outside := filepath.Join(baseDir+"-backup", "weather", "skill.json")
