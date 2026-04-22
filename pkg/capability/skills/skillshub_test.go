@@ -4,26 +4,10 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
-	"net/url"
 	"os"
 	"path/filepath"
 	"testing"
 )
-
-type hostRewriteTransport struct {
-	target *url.URL
-	base   http.RoundTripper
-}
-
-func (t hostRewriteTransport) RoundTrip(req *http.Request) (*http.Response, error) {
-	clone := req.Clone(req.Context())
-	if clone.URL.Host == "skills.sh" || clone.URL.Host == "raw.githubusercontent.com" {
-		clone.URL.Scheme = t.target.Scheme
-		clone.URL.Host = t.target.Host
-		clone.Host = t.target.Host
-	}
-	return t.base.RoundTrip(clone)
-}
 
 func TestSkillsHubRemoteFlows(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -42,15 +26,13 @@ func TestSkillsHubRemoteFlows(t *testing.T) {
 	}))
 	defer server.Close()
 
-	targetURL, err := url.Parse(server.URL)
-	if err != nil {
-		t.Fatalf("parse server url: %v", err)
-	}
-
-	originalTransport := http.DefaultTransport
-	http.DefaultTransport = hostRewriteTransport{target: targetURL, base: originalTransport}
+	originalAPIBase := SKILLSH_API_BASE
+	originalRawBase := rawGitHubContentURL
+	SKILLSH_API_BASE = server.URL
+	rawGitHubContentURL = server.URL
 	t.Cleanup(func() {
-		http.DefaultTransport = originalTransport
+		SKILLSH_API_BASE = originalAPIBase
+		rawGitHubContentURL = originalRawBase
 	})
 
 	results, err := SearchSkills(context.Background(), "weather", 0)
@@ -104,15 +86,13 @@ func TestGetSkillMarkdownAndRemoteErrors(t *testing.T) {
 	}))
 	defer server.Close()
 
-	targetURL, err := url.Parse(server.URL)
-	if err != nil {
-		t.Fatalf("parse server url: %v", err)
-	}
-
-	originalTransport := http.DefaultTransport
-	http.DefaultTransport = hostRewriteTransport{target: targetURL, base: originalTransport}
+	originalAPIBase := SKILLSH_API_BASE
+	originalRawBase := rawGitHubContentURL
+	SKILLSH_API_BASE = server.URL
+	rawGitHubContentURL = server.URL
 	t.Cleanup(func() {
-		http.DefaultTransport = originalTransport
+		SKILLSH_API_BASE = originalAPIBase
+		rawGitHubContentURL = originalRawBase
 	})
 
 	if _, err := SearchSkills(context.Background(), "weather", 5); err == nil {
