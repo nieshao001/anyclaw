@@ -14,6 +14,7 @@ import {
 import { useEffect, useMemo, useState } from "react";
 
 import { BackendPropertyList } from "@/features/backend-ui/BackendPropertyList";
+import { StatusBadge, type StatusBadgeTone } from "@/features/backend-ui/StatusBadge";
 import { useShellStore, type SettingsSection } from "@/features/shell/useShellStore";
 import { useWorkspaceOverview } from "@/features/workspace/useWorkspaceOverview";
 
@@ -159,7 +160,6 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
   const [skillFilter, setSkillFilter] = useState<SkillFilter>("all");
   const [agentFilter, setAgentFilter] = useState<AgentFilter>("all");
   const [skillEnabled, setSkillEnabled] = useState<Record<string, boolean>>({});
-  const [agentEnabled, setAgentEnabled] = useState<Record<string, boolean>>({});
   const [pendingSkillName, setPendingSkillName] = useState<string | null>(null);
 
   const toggleSkillMutation = useMutation({
@@ -173,14 +173,6 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
   useEffect(() => {
     setSkillEnabled(Object.fromEntries(data.localSkills.map((skill) => [skill.name, skill.enabled])));
   }, [data.localSkills]);
-
-  useEffect(() => {
-    setAgentEnabled(
-      Object.fromEntries(
-        data.localAgents.map((agent) => [agent.name, agent.active || agent.status !== "已停用"]),
-      ),
-    );
-  }, [data.localAgents]);
 
   useEffect(() => {
     setSearch("");
@@ -208,52 +200,6 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
     });
   }, [data.localSkills, search, skillEnabled, skillFilter]);
 
-  useEffect(() => {
-    if (pendingSkillName !== null) {
-      return;
-    }
-    const changedSkill = data.localSkills.find((skill) => {
-      const nextEnabled = skillEnabled[skill.name];
-      return nextEnabled !== undefined && nextEnabled !== skill.enabled;
-    });
-    if (!changedSkill) {
-      return;
-    }
-    const nextEnabled = skillEnabled[changedSkill.name];
-    if (nextEnabled === undefined) {
-      return;
-    }
-
-    let cancelled = false;
-    setPendingSkillName(changedSkill.name);
-    void toggleSkillMutation
-      .mutateAsync({ enabled: nextEnabled, name: changedSkill.name })
-      .then(async () => {
-        if (cancelled) {
-          return;
-        }
-        await queryClient.invalidateQueries({ queryKey: ["workspace-overview"] });
-      })
-      .catch(() => {
-        if (cancelled) {
-          return;
-        }
-        setSkillEnabled((current) => ({
-          ...current,
-          [changedSkill.name]: changedSkill.enabled,
-        }));
-      })
-      .finally(() => {
-        if (!cancelled) {
-          setPendingSkillName(null);
-        }
-      });
-
-    return () => {
-      cancelled = true;
-    };
-  }, [data.localSkills, pendingSkillName, skillEnabled, toggleSkillMutation]);
-
   const visibleAgents = useMemo(() => {
     const keyword = search.trim().toLowerCase();
     return data.localAgents.filter((agent) => {
@@ -261,16 +207,15 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
         keyword === "" ||
         [agent.name, agent.summary, agent.providerName, agent.role].join(" ").toLowerCase().includes(keyword);
       const enabledByStatus = agent.active || agent.status !== "已停用";
-      const enabled = agentEnabled[agent.name] ?? enabledByStatus;
       const matchesFilter =
         agentFilter === "all"
           ? true
           : agentFilter === "active"
             ? agent.active
-            : enabled;
+            : enabledByStatus;
       return matchesKeyword && matchesFilter;
     });
-  }, [agentEnabled, agentFilter, data.localAgents, search]);
+  }, [agentFilter, data.localAgents, search]);
 
   const usageCards = [
     { label: "本地 Skill", value: String(data.localSkills.length) },
@@ -285,6 +230,39 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
     { label: "模型", value: data.runtimeProfile.model || "未设置" },
     { label: "网关", value: data.runtimeProfile.address },
   ];
+
+  async function handleToggleSkill(name: string, currentEnabled: boolean) {
+    if (pendingSkillName !== null) {
+      return;
+    }
+
+    const nextEnabled = !currentEnabled;
+    setPendingSkillName(name);
+    setSkillEnabled((current) => ({
+      ...current,
+      [name]: nextEnabled,
+    }));
+
+    try {
+      await toggleSkillMutation.mutateAsync({ enabled: nextEnabled, name });
+      await queryClient.invalidateQueries({ queryKey: ["workspace-overview"] });
+    } catch {
+      setSkillEnabled((current) => ({
+        ...current,
+        [name]: currentEnabled,
+      }));
+    } finally {
+      setPendingSkillName(null);
+    }
+  }
+
+  function resolveAgentEnabled(status: string, active: boolean) {
+    return active || status !== "已停用";
+  }
+
+  function resolveAgentStatusTone(enabled: boolean): StatusBadgeTone {
+    return enabled ? "success" : "default";
+  }
 
   function renderGeneralSection() {
     return (
@@ -408,6 +386,7 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
           {visibleSkills.length > 0 ? (
             visibleSkills.map((skill) => {
               const enabled = skillEnabled[skill.name] ?? skill.enabled;
+              const skillToggleDisabled = pendingSkillName !== null;
 
               return (
                 <article key={skill.name} className="rounded-[28px] border border-[#eceff3] bg-white p-5 shadow-[0_12px_30px_rgba(15,23,42,0.04)]">
@@ -423,13 +402,9 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
                     </div>
                     <StatusSwitch
                       active={enabled}
+                      disabled={skillToggleDisabled}
                       label={`${skill.name} 状态`}
-                      onToggle={() =>
-                        setSkillEnabled((current) => ({
-                          ...current,
-                          [skill.name]: !(current[skill.name] ?? skill.enabled),
-                        }))
-                      }
+                      onToggle={() => void handleToggleSkill(skill.name, enabled)}
                     />
                   </div>
 
@@ -493,8 +468,7 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
         <div className="grid gap-4 xl:grid-cols-2">
           {visibleAgents.length > 0 ? (
             visibleAgents.map((agent) => {
-              const enabledByStatus = agent.active || agent.status !== "已停用";
-              const enabled = agentEnabled[agent.name] ?? enabledByStatus;
+              const enabled = resolveAgentEnabled(agent.status, agent.active);
 
               return (
                 <article key={agent.name} className="rounded-[28px] border border-[#eceff3] bg-white p-5 shadow-[0_12px_30px_rgba(15,23,42,0.04)]">
@@ -511,16 +485,13 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
                         <div className="mt-3 text-sm leading-6 text-[#667085]">{agent.summary}</div>
                       </div>
                     </div>
-                    <StatusSwitch
-                      active={enabled}
-                      label={`${agent.name} 状态`}
-                      onToggle={() =>
-                        setAgentEnabled((current) => ({
-                          ...current,
-                          [agent.name]: !(current[agent.name] ?? enabledByStatus),
-                        }))
-                      }
-                    />
+                    <div className="flex shrink-0 flex-col items-end gap-2">
+                      <StatusBadge
+                        label={enabled ? "后端已启用" : "后端已停用"}
+                        tone={resolveAgentStatusTone(enabled)}
+                      />
+                      <span className="text-xs text-[#98a2b3]">当前仅展示状态</span>
+                    </div>
                   </div>
 
                   <div className="mt-5 flex flex-wrap gap-2">
