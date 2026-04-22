@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { Bot, Cable, Cloud, LayoutDashboard, Sparkles } from "lucide-react";
+import { Bot, Cable, Cloud, LayoutDashboard, Settings2, Sparkles } from "lucide-react";
 import { useState } from "react";
 
 import { BackendDetailSection } from "@/features/backend-ui/BackendDetailSection";
@@ -11,6 +11,8 @@ import { BackendSummaryStrip } from "@/features/backend-ui/BackendSummaryStrip";
 import { StatusBadge } from "@/features/backend-ui/StatusBadge";
 import { BackendToolbar } from "@/features/backend-ui/BackendToolbar";
 import { getStatusTone } from "@/features/backend-ui/getStatusTone";
+import { ShellOverlays } from "@/features/shell/ShellOverlays";
+import { useShellStore } from "@/features/shell/useShellStore";
 import { type AgentRecord, type ChannelRecord, type SkillRecord, useWorkspaceOverview } from "@/features/workspace/useWorkspaceOverview";
 
 const queryClient = new QueryClient({
@@ -166,6 +168,9 @@ function ChannelList({ items }: { items: ChannelRecord[] }) {
 
 function WorkspaceOverviewApp() {
   const { data } = useWorkspaceOverview();
+  const openAgentDrawer = useShellStore((state) => state.openAgentDrawer);
+  const openModelSettings = useShellStore((state) => state.openModelSettings);
+  const openSettings = useShellStore((state) => state.openSettings);
   const [query, setQuery] = useState("");
   const [filter, setFilter] = useState<OverviewFilter>("all");
 
@@ -219,6 +224,33 @@ function WorkspaceOverviewApp() {
             ]}
           />
         </div>
+
+        <section className="mt-4 grid gap-3 sm:grid-cols-3">
+          <button
+            className="shell-button h-12 justify-center px-5 text-sm font-medium"
+            onClick={openAgentDrawer}
+            type="button"
+          >
+            <Bot size={16} strokeWidth={2.1} />
+            <span>查看 Agent 抽屉</span>
+          </button>
+          <button
+            className="shell-button h-12 justify-center px-5 text-sm font-medium"
+            onClick={openModelSettings}
+            type="button"
+          >
+            <Sparkles size={16} strokeWidth={2.1} />
+            <span>打开模型设置</span>
+          </button>
+          <button
+            className="chip-button h-12 justify-center px-5 text-sm"
+            onClick={() => openSettings("general")}
+            type="button"
+          >
+            <Settings2 size={16} strokeWidth={2.1} />
+            <span>打开工作区设置</span>
+          </button>
+        </section>
 
         <BackendToolbar
           groups={[
@@ -363,6 +395,7 @@ function WorkspaceOverviewApp() {
           </BackendDetailSection>
         </section>
       </div>
+      <ShellOverlays />
     </div>
   );
 }
