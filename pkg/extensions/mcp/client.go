@@ -13,24 +13,24 @@ import (
 )
 
 type Client struct {
-	mu        sync.RWMutex
-	name      string
-	command   string
-	args      []string
-	env       map[string]string
-	transport string
-	tools     []Tool
-	resources []Resource
-	prompts   []Prompt
-	cmd       *exec.Cmd
-	stdin     io.WriteCloser
-	stdout    io.ReadCloser
-	stderr    io.ReadCloser
-	running   bool
-	reqID     atomic.Int64
-	pending   map[int64]chan *Response
+	mu         sync.RWMutex
+	name       string
+	command    string
+	args       []string
+	env        map[string]string
+	transport  string
+	tools      []Tool
+	resources  []Resource
+	prompts    []Prompt
+	cmd        *exec.Cmd
+	stdin      io.WriteCloser
+	stdout     io.ReadCloser
+	stderr     io.ReadCloser
+	running    bool
+	reqID      atomic.Int64
+	pending    map[int64]chan *Response
 	readerDone chan struct{}
-	readErr   error
+	readErr    error
 }
 
 type Tool struct {
