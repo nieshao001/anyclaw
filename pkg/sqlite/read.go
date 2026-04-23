@@ -90,7 +90,10 @@ func (q *QueryBuilder) Build() (string, []any) {
 }
 
 func (db *DB) Get(ctx context.Context, table string, columns []string, where string, whereArgs ...any) (map[string]any, error) {
-	q := Query(table).Select(columns...).Where(where, whereArgs...).Limit(1)
+	q := Query(table).Select(columns...).Limit(1)
+	if where != "" {
+		q.Where(where, whereArgs...)
+	}
 	query, args := q.Build()
 
 	rows, err := db.QueryContext(ctx, query, args...)
@@ -106,7 +109,10 @@ func (db *DB) Get(ctx context.Context, table string, columns []string, where str
 }
 
 func (db *DB) GetWithTx(ctx context.Context, tx *sql.Tx, table string, columns []string, where string, whereArgs ...any) (map[string]any, error) {
-	q := Query(table).Select(columns...).Where(where, whereArgs...).Limit(1)
+	q := Query(table).Select(columns...).Limit(1)
+	if where != "" {
+		q.Where(where, whereArgs...)
+	}
 	query, args := q.Build()
 
 	rows, err := tx.QueryContext(ctx, query, args...)

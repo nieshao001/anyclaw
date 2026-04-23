@@ -68,6 +68,14 @@ func TestReadOperations(t *testing.T) {
 		t.Fatalf("unexpected row: %#v", row)
 	}
 
+	row, err = db.Get(ctx, "test", []string{"id", "name"}, "")
+	if err != nil {
+		t.Fatalf("Get without where failed: %v", err)
+	}
+	if valueString(row["name"]) != "alpha" {
+		t.Fatalf("unexpected row without where: %#v", row)
+	}
+
 	if _, err := db.Get(ctx, "test", []string{"id"}, "name = ?", "missing"); !errors.Is(err, sql.ErrNoRows) {
 		t.Fatalf("expected sql.ErrNoRows, got %v", err)
 	}
@@ -167,6 +175,14 @@ func TestReadOperationsWithTransaction(t *testing.T) {
 	}
 	if valueString(row["value"]) != "alpha_value" {
 		t.Fatalf("unexpected tx row: %#v", row)
+	}
+
+	row, err = db.GetWithTx(ctx, tx.Tx, "test", []string{"name"}, "")
+	if err != nil {
+		t.Fatalf("GetWithTx without where failed: %v", err)
+	}
+	if valueString(row["name"]) != "alpha" {
+		t.Fatalf("unexpected tx row without where: %#v", row)
 	}
 
 	rows, err := db.ListWithTx(ctx, tx.Tx, "test", []string{"name"}, "")
