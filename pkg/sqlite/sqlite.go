@@ -203,9 +203,15 @@ func (db *DB) checkpointWAL(ctx context.Context) {
 }
 
 func (db *DB) WALSize(ctx context.Context) (int64, error) {
-	var size int64
-	err := db.QueryRowContext(ctx, "PRAGMA wal_checkpoint").Scan(&size)
-	return size, err
+	var busy int64
+	var logFrames int64
+	var checkpointed int64
+
+	err := db.QueryRowContext(ctx, "PRAGMA wal_checkpoint(PASSIVE)").Scan(&busy, &logFrames, &checkpointed)
+	if err != nil {
+		return 0, err
+	}
+	return logFrames, nil
 }
 
 func (db *DB) Stats() PoolStats {
