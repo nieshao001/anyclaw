@@ -126,6 +126,10 @@ func (h *Histogram) Observe(v float64) {
 func (h *Histogram) Percentile(p float64) float64 {
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	return h.percentileLocked(p)
+}
+
+func (h *Histogram) percentileLocked(p float64) float64 {
 	if h.Count == 0 {
 		return 0
 	}
@@ -292,6 +296,7 @@ func (r *Registry) JSONFormat() map[string]any {
 		})
 		c.mu.Unlock()
 	}
+	result["counters"] = counters
 
 	gauges := result["gauges"].([]map[string]any)
 	for _, g := range r.gauges {
@@ -304,6 +309,7 @@ func (r *Registry) JSONFormat() map[string]any {
 		})
 		g.mu.Unlock()
 	}
+	result["gauges"] = gauges
 
 	histograms := result["histograms"].([]map[string]any)
 	for _, h := range r.latency {
@@ -316,13 +322,14 @@ func (r *Registry) JSONFormat() map[string]any {
 			"sum":     h.Sum,
 			"min":     h.Min,
 			"max":     h.Max,
-			"p50":     h.Percentile(0.50),
-			"p95":     h.Percentile(0.95),
-			"p99":     h.Percentile(0.99),
+			"p50":     h.percentileLocked(0.50),
+			"p95":     h.percentileLocked(0.95),
+			"p99":     h.percentileLocked(0.99),
 			"buckets": h.Buckets,
 		})
 		h.mu.Unlock()
 	}
+	result["histograms"] = histograms
 
 	return result
 }
