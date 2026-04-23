@@ -119,31 +119,20 @@ func TestGatewayRunStartsWorkers(t *testing.T) {
 	}()
 
 	ran := make(chan struct{}, 1)
-	deadline := time.Now().Add(3 * time.Second)
-	for time.Now().Before(deadline) {
+	server.jobQueue <- func() {
 		select {
-		case err := <-errCh:
-			t.Fatalf("run exited early: %v", err)
+		case ran <- struct{}{}:
 		default:
-		}
-		if server.httpServer == nil {
-			time.Sleep(10 * time.Millisecond)
-			continue
-		}
-		server.jobQueue <- func() {
-			select {
-			case ran <- struct{}{}:
-			default:
-			}
-		}
-		select {
-		case <-ran:
-			return
-		case <-time.After(50 * time.Millisecond):
 		}
 	}
 
-	t.Fatal("gateway worker did not execute queued jobs")
+	select {
+	case <-ran:
+	case err := <-errCh:
+		t.Fatalf("run exited early: %v", err)
+	case <-time.After(3 * time.Second):
+		t.Fatal("gateway worker did not execute queued jobs")
+	}
 }
 
 func TestRegisterGatewayRoutesMountsGatewayAPIs(t *testing.T) {
