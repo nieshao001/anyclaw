@@ -38,6 +38,32 @@ func setupVecStore(t *testing.T) *VecStore {
 	return vs
 }
 
+func setupVecStoreWithDistance(t *testing.T, distance DistanceMetric) *VecStore {
+	t.Helper()
+
+	db, err := sql.Open("sqlite", ":memory:")
+	if err != nil {
+		t.Fatalf("failed to open db: %v", err)
+	}
+
+	t.Cleanup(func() {
+		db.Close()
+	})
+
+	vs := NewVecStore(VecStoreConfig{
+		DB:         db,
+		TableName:  "distance_vectors",
+		Dimensions: 4,
+		Distance:   distance,
+	})
+
+	if err := vs.Init(context.Background()); err != nil {
+		t.Fatalf("failed to init vec store: %v", err)
+	}
+
+	return vs
+}
+
 func TestVecStoreInit(t *testing.T) {
 	vs := setupVecStore(t)
 
@@ -130,6 +156,9 @@ func TestVecStoreSearch(t *testing.T) {
 	if results[0].RowID != 1 {
 		t.Errorf("expected first result rowid 1, got %d", results[0].RowID)
 	}
+	if results[0].ID != 1 {
+		t.Errorf("expected first result id 1, got %d", results[0].ID)
+	}
 }
 
 func TestVecStoreSearchWithThreshold(t *testing.T) {
@@ -152,6 +181,65 @@ func TestVecStoreSearchWithThreshold(t *testing.T) {
 
 	if results[0].Distance > 0.01 {
 		t.Errorf("expected distance <= 0.01, got %f", results[0].Distance)
+	}
+}
+
+func TestVecStoreSearchWithZeroThresholdReturnsExactMatchesOnly(t *testing.T) {
+	tests := []struct {
+		name     string
+		distance DistanceMetric
+		match    []float32
+		other    []float32
+	}{
+		{
+			name:     "cosine",
+			distance: DistanceCosine,
+			match:    []float32{1, 0, 0, 0},
+			other:    []float32{0, 1, 0, 0},
+		},
+		{
+			name:     "l2",
+			distance: DistanceL2,
+			match:    []float32{1, 1, 1, 1},
+			other:    []float32{2, 2, 2, 2},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			vs := setupVecStoreWithDistance(t, tt.distance)
+			ctx := context.Background()
+
+			if err := vs.Insert(ctx, 1, tt.match, nil); err != nil {
+				t.Fatalf("insert exact match failed: %v", err)
+			}
+			if err := vs.Insert(ctx, 2, tt.other, nil); err != nil {
+				t.Fatalf("insert non-match failed: %v", err)
+			}
+
+			results, err := vs.SearchWithFilter(ctx, tt.match, 10, 0, nil)
+			if err != nil {
+				t.Fatalf("search with zero threshold failed: %v", err)
+			}
+
+			if len(results) != 1 {
+				t.Fatalf("expected 1 exact match, got %d", len(results))
+			}
+			if results[0].RowID != 1 {
+				t.Fatalf("expected exact match rowid 1, got %d", results[0].RowID)
+			}
+			if results[0].ID != 1 {
+				t.Fatalf("expected exact match id 1, got %d", results[0].ID)
+			}
+
+			unfiltered, err := vs.Search(ctx, tt.match, 10)
+			if err != nil {
+				t.Fatalf("unfiltered search failed: %v", err)
+			}
+			if len(unfiltered) != 2 {
+				t.Fatalf("expected unfiltered search to return 2 results, got %d", len(unfiltered))
+			}
+		})
 	}
 }
 
@@ -231,6 +319,9 @@ func TestVecStoreGet(t *testing.T) {
 
 	if item.RowID != 42 {
 		t.Errorf("expected rowid 42, got %d", item.RowID)
+	}
+	if item.ID != 42 {
+		t.Errorf("expected id 42, got %d", item.ID)
 	}
 
 	if len(item.Vector) != 4 {
@@ -623,6 +714,22 @@ func TestVecStoreRejectsNilDB(t *testing.T) {
 	_, err := vs.Count(context.Background())
 	if err == nil {
 		t.Fatal("expected nil db to fail")
+	}
+	if !strings.Contains(err.Error(), "db cannot be nil") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestVecStoreVecVersionValidatesConfig(t *testing.T) {
+	vs := NewVecStore(VecStoreConfig{
+		TableName:  "vectors",
+		Dimensions: 4,
+		Distance:   DistanceCosine,
+	})
+
+	_, err := vs.VecVersion(context.Background())
+	if err == nil {
+		t.Fatal("expected VecVersion to validate config")
 	}
 	if !strings.Contains(err.Error(), "db cannot be nil") {
 		t.Fatalf("unexpected error: %v", err)

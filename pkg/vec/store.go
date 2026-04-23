@@ -18,6 +18,8 @@ const (
 	DistanceL2     DistanceMetric = "l2"
 )
 
+const noDistanceThreshold = -1.0
+
 type VecStore struct {
 	db         *sql.DB
 	tableName  string
@@ -105,11 +107,11 @@ func (vs *VecStore) buildCreateTableSQL() (string, error) {
 	), nil
 }
 
-func (vs *VecStore) Insert(ctx context.Context, id any, vector []float32, metadata map[string]string) error {
+func (vs *VecStore) Insert(ctx context.Context, id int64, vector []float32, metadata map[string]string) error {
 	return vs.InsertWithAux(ctx, id, vector, metadata, nil)
 }
 
-func (vs *VecStore) InsertWithAux(ctx context.Context, id any, vector []float32, metadata map[string]string, aux map[string]string) error {
+func (vs *VecStore) InsertWithAux(ctx context.Context, id int64, vector []float32, metadata map[string]string, aux map[string]string) error {
 	if err := vs.validateConfig(); err != nil {
 		return err
 	}
@@ -186,7 +188,7 @@ func (vs *VecStore) InsertBatch(ctx context.Context, items []VecItem) error {
 }
 
 func (vs *VecStore) Search(ctx context.Context, queryVector []float32, limit int) ([]VecSearchResult, error) {
-	return vs.SearchWithFilter(ctx, queryVector, limit, 0, nil)
+	return vs.SearchWithFilter(ctx, queryVector, limit, noDistanceThreshold, nil)
 }
 
 func (vs *VecStore) SearchWithFilter(ctx context.Context, queryVector []float32, limit int, threshold float64, metadataFilter map[string]string) ([]VecSearchResult, error) {
@@ -217,7 +219,7 @@ func (vs *VecStore) SearchWithFilter(ctx context.Context, queryVector []float32,
 
 	args := []any{vectorToBlob(queryVector), limit}
 
-	if threshold > 0 {
+	if threshold >= 0 {
 		query += " AND distance <= ?"
 		args = append(args, threshold)
 	}
@@ -291,7 +293,7 @@ func (vs *VecStore) SearchWithFilter(ctx context.Context, queryVector []float32,
 	return results, nil
 }
 
-func (vs *VecStore) Get(ctx context.Context, id any) (*VecItem, error) {
+func (vs *VecStore) Get(ctx context.Context, id int64) (*VecItem, error) {
 	if err := vs.validateConfig(); err != nil {
 		return nil, err
 	}
@@ -351,7 +353,7 @@ func (vs *VecStore) Get(ctx context.Context, id any) (*VecItem, error) {
 	return &item, nil
 }
 
-func (vs *VecStore) Delete(ctx context.Context, id any) error {
+func (vs *VecStore) Delete(ctx context.Context, id int64) error {
 	if err := vs.validateConfig(); err != nil {
 		return err
 	}
@@ -363,7 +365,7 @@ func (vs *VecStore) Delete(ctx context.Context, id any) error {
 	return nil
 }
 
-func (vs *VecStore) UpdateVector(ctx context.Context, id any, vector []float32) error {
+func (vs *VecStore) UpdateVector(ctx context.Context, id int64, vector []float32) error {
 	if err := vs.validateConfig(); err != nil {
 		return err
 	}
@@ -379,7 +381,7 @@ func (vs *VecStore) UpdateVector(ctx context.Context, id any, vector []float32) 
 	return nil
 }
 
-func (vs *VecStore) UpdateMetadata(ctx context.Context, id any, metadata map[string]string) error {
+func (vs *VecStore) UpdateMetadata(ctx context.Context, id int64, metadata map[string]string) error {
 	if err := vs.validateConfig(); err != nil {
 		return err
 	}
@@ -503,6 +505,9 @@ func (vs *VecStore) List(ctx context.Context, limit int) ([]VecItem, error) {
 }
 
 func (vs *VecStore) VecVersion(ctx context.Context) (string, error) {
+	if err := vs.validateConfig(); err != nil {
+		return "", err
+	}
 	var version string
 	err := vs.db.QueryRowContext(ctx, "SELECT vec_version()").Scan(&version)
 	return version, err
@@ -520,8 +525,7 @@ func (vs *VecStore) TableInfo(ctx context.Context) (*VecTableInfo, error) {
 	}
 	info.VectorCount = count
 
-	var vecVersion string
-	if err := vs.db.QueryRowContext(ctx, "SELECT vec_version()").Scan(&vecVersion); err == nil {
+	if vecVersion, err := vs.VecVersion(ctx); err == nil {
 		info.VecVersion = vecVersion
 	}
 
@@ -530,7 +534,7 @@ func (vs *VecStore) TableInfo(ctx context.Context) (*VecTableInfo, error) {
 
 type VecItem struct {
 	RowID    int64
-	ID       any
+	ID       int64
 	Vector   []float32
 	Metadata map[string]string
 	Aux      map[string]string
@@ -538,7 +542,7 @@ type VecItem struct {
 
 type VecSearchResult struct {
 	RowID    int64
-	ID       any
+	ID       int64
 	Distance float64
 	Metadata map[string]any
 	Aux      map[string]any
@@ -556,7 +560,7 @@ type sqlExecutor interface {
 	ExecContext(context.Context, string, ...any) (sql.Result, error)
 }
 
-func (vs *VecStore) execInsert(ctx context.Context, execer sqlExecutor, id any, vector []float32, metadata map[string]string, aux map[string]string) error {
+func (vs *VecStore) execInsert(ctx context.Context, execer sqlExecutor, id int64, vector []float32, metadata map[string]string, aux map[string]string) error {
 	cols := []string{"rowid", "vector"}
 	args := []any{id, vectorToBlob(vector)}
 
