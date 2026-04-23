@@ -6,12 +6,33 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/1024XEngineer/anyclaw/pkg/config"
+	"github.com/1024XEngineer/anyclaw/pkg/runtime"
 )
 
-func TestNewGatewayShellDefaults(t *testing.T) {
-	runtimeRef := struct{ Name string }{Name: "main"}
+func newTestMainRuntime(t *testing.T) *runtime.MainRuntime {
+	t.Helper()
+
+	workDir := t.TempDir()
+	cfg := config.DefaultConfig()
+	cfg.Gateway.Host = "127.0.0.1"
+	cfg.Gateway.Port = 0
+	cfg.Agent.Name = "main"
+
+	return &runtime.MainRuntime{
+		ConfigPath: filepath.Join(workDir, "anyclaw.json"),
+		Config:     cfg,
+		WorkDir:    workDir,
+		WorkingDir: workDir,
+	}
+}
+
+func TestNewGatewayDefaults(t *testing.T) {
+	runtimeRef := newTestMainRuntime(t)
 	server := New(runtimeRef)
 	if server == nil {
 		t.Fatal("expected server")
@@ -19,8 +40,8 @@ func TestNewGatewayShellDefaults(t *testing.T) {
 	if server.mainRuntime != runtimeRef {
 		t.Fatalf("expected runtime reference to be retained")
 	}
-	if got := server.address(); got != defaultGatewayAddress {
-		t.Fatalf("expected default address %q, got %q", defaultGatewayAddress, got)
+	if got := server.address(); got != runtime.GatewayAddress(runtimeRef.Config) {
+		t.Fatalf("expected runtime address %q, got %q", runtime.GatewayAddress(runtimeRef.Config), got)
 	}
 }
 
@@ -28,11 +49,8 @@ func TestGatewayAddressValidation(t *testing.T) {
 	if got := (*Server)(nil).address(); got != defaultGatewayAddress {
 		t.Fatalf("expected nil server to use default address, got %q", got)
 	}
-	if got := (&Server{addr: "not-a-host-port"}).address(); got != defaultGatewayAddress {
-		t.Fatalf("expected invalid address to use default address, got %q", got)
-	}
-	if got := (&Server{addr: "127.0.0.1:0"}).address(); got != "127.0.0.1:0" {
-		t.Fatalf("expected valid address to be preserved, got %q", got)
+	if got := (&Server{}).address(); got != defaultGatewayAddress {
+		t.Fatalf("expected empty server to use default address, got %q", got)
 	}
 }
 
@@ -50,7 +68,14 @@ func TestGatewayRunReportsListenFailure(t *testing.T) {
 	}
 	defer listener.Close()
 
-	server := &Server{addr: listener.Addr().String()}
+	runtimeRef := newTestMainRuntime(t)
+	host, port, err := net.SplitHostPort(listener.Addr().String())
+	if err != nil {
+		t.Fatalf("split host/port: %v", err)
+	}
+	runtimeRef.Config.Gateway.Host = host
+	runtimeRef.Config.Gateway.Port = parseIntParam(port, 0)
+	server := New(runtimeRef)
 	err = server.Run(context.Background())
 	if err == nil || !strings.Contains(err.Error(), "gateway server failed") {
 		t.Fatalf("expected listen failure, got %v", err)
@@ -61,7 +86,7 @@ func TestGatewayRunStopsOnContextCancel(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	server := &Server{addr: "127.0.0.1:0"}
+	server := New(newTestMainRuntime(t))
 	if err := server.Run(ctx); err != nil {
 		t.Fatalf("run with canceled context: %v", err)
 	}
