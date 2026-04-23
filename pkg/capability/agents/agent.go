@@ -1094,7 +1094,7 @@ func limitStrings(items []string, limit int) []string {
 }
 
 func (a *Agent) ShowMemory() (string, error) {
-	return a.memory.FormatAsMarkdown()
+	return memory.NewMemoryService(a.memory).FormatAsMarkdown()
 }
 
 func (a *Agent) recordConversation(userInput string, response string) {
