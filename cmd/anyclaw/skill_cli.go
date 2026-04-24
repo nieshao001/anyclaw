@@ -220,6 +220,7 @@ func printSkillUsage() {
 Usage:
   anyclaw skill search <query>
   anyclaw skill install <name>
+  anyclaw skill install <owner>/<repo>/<skill>
   anyclaw skill list
   anyclaw skill info <name>
   anyclaw skill catalog [query]

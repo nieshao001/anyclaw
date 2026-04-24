@@ -48,6 +48,9 @@ func TestRunSkillCommandWithoutArgsPrintsUsage(t *testing.T) {
 	if !strings.Contains(stdout, "AnyClaw skill commands:") {
 		t.Fatalf("expected skill usage output, got %q", stdout)
 	}
+	if !strings.Contains(stdout, "anyclaw skill install <owner>/<repo>/<skill>") {
+		t.Fatalf("expected github install usage hint, got %q", stdout)
+	}
 }
 
 func TestRunSkillCommandUnknownSubcommandPrintsUsage(t *testing.T) {
