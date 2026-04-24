@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -90,6 +91,30 @@ func TestRunAnyClawCLIHelpPrintsUsage(t *testing.T) {
 	}
 }
 
+func TestRunAnyClawCLINoArgsPrintsUsage(t *testing.T) {
+	stdout, _, err := captureCLIOutput(t, func() error {
+		return runAnyClawCLI(nil)
+	})
+	if err != nil {
+		t.Fatalf("runAnyClawCLI no args: %v", err)
+	}
+	if !strings.Contains(stdout, "AnyClaw commands:") {
+		t.Fatalf("expected CLI usage output, got %q", stdout)
+	}
+}
+
+func TestRunAnyClawCLIRoutesPluginCommand(t *testing.T) {
+	stdout, _, err := captureCLIOutput(t, func() error {
+		return runAnyClawCLI([]string{"plugin"})
+	})
+	if err != nil {
+		t.Fatalf("runAnyClawCLI plugin: %v", err)
+	}
+	if !strings.Contains(stdout, "AnyClaw plugin commands:") {
+		t.Fatalf("expected plugin usage output, got %q", stdout)
+	}
+}
+
 func TestRunMCPCommandWithoutArgsPrintsUsage(t *testing.T) {
 	stdout, _, err := captureCLIOutput(t, func() error {
 		return runMCPCommand(nil)
@@ -145,6 +170,47 @@ func TestRunMCPToolsTextOutputIncludesSources(t *testing.T) {
 	if !strings.Contains(stdout, "[helper] echo") {
 		t.Fatalf("expected configured tool in text output, got %q", stdout)
 	}
+}
+
+func TestAnyClawMainHelperProcess(t *testing.T) {
+	mode := os.Getenv("ANYCLAW_MAIN_HELPER")
+	if mode == "" {
+		return
+	}
+
+	os.Args = []string{"anyclaw"}
+	if mode == "success" {
+		os.Args = append(os.Args, "help")
+	} else {
+		os.Args = append(os.Args, "unknown")
+	}
+	main()
+}
+
+func TestMainExecutesCLIAndPropagatesErrors(t *testing.T) {
+	t.Run("success", func(t *testing.T) {
+		cmd := exec.Command(os.Args[0], "-test.run=TestAnyClawMainHelperProcess")
+		cmd.Env = append(os.Environ(), "ANYCLAW_MAIN_HELPER=success")
+		output, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("expected success exit, got %v\noutput=%s", err, output)
+		}
+		if !strings.Contains(string(output), "AnyClaw commands:") {
+			t.Fatalf("expected CLI usage output, got %q", output)
+		}
+	})
+
+	t.Run("error", func(t *testing.T) {
+		cmd := exec.Command(os.Args[0], "-test.run=TestAnyClawMainHelperProcess")
+		cmd.Env = append(os.Environ(), "ANYCLAW_MAIN_HELPER=error")
+		output, err := cmd.CombinedOutput()
+		if err == nil {
+			t.Fatalf("expected non-zero exit for error path, got output=%s", output)
+		}
+		if !strings.Contains(string(output), "unknown command: unknown") {
+			t.Fatalf("expected unknown command output, got %q", output)
+		}
+	})
 }
 
 func captureCLIOutput(t *testing.T, fn func() error) (string, string, error) {

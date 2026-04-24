@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 )
@@ -24,6 +25,8 @@ func runAnyClawCLI(args []string) error {
 		return nil
 	case "mcp":
 		return runMCPCommand(args[1:])
+	case "plugin":
+		return runPluginCommand(args[1:])
 	default:
 		printCLIUsage()
 		return fmt.Errorf("unknown command: %s", args[0])
@@ -34,5 +37,23 @@ func printCLIUsage() {
 	fmt.Print(`AnyClaw commands:
 Usage:
   anyclaw mcp <subcommand>            Run MCP-related commands
+  anyclaw plugin <subcommand>         Run plugin management commands
 `)
+}
+
+func printSuccess(format string, args ...any) {
+	fmt.Printf(format+"\n", args...)
+}
+
+func printInfo(format string, args ...any) {
+	fmt.Printf(format+"\n", args...)
+}
+
+func writePrettyJSON(value any) error {
+	data, err := json.MarshalIndent(value, "", "  ")
+	if err != nil {
+		return err
+	}
+	fmt.Println(string(data))
+	return nil
 }
