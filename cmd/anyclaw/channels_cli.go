@@ -129,10 +129,7 @@ func configuredChannelStatuses(cfg *config.Config) []inputlayer.Status {
 			if manifest.Builtin || manifest.Channel == nil {
 				continue
 			}
-			name := strings.TrimSpace(manifest.Channel.Name)
-			if name == "" {
-				name = strings.TrimSpace(manifest.Name)
-			}
+			name := strings.TrimSpace(manifest.Name)
 			if name == "" {
 				continue
 			}

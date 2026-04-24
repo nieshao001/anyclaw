@@ -201,13 +201,80 @@ func TestConfiguredChannelStatusesIncludesPluginChannels(t *testing.T) {
 	}
 	foundMatrix := false
 	for _, item := range items {
-		if item.Name == "matrix" && item.Enabled {
+		if item.Name == "matrix-channel" && item.Enabled {
 			foundMatrix = true
 			break
 		}
 	}
 	if !foundMatrix {
-		t.Fatalf("expected plugin-provided matrix channel, got %#v", items)
+		t.Fatalf("expected plugin-provided manifest name in status output, got %#v", items)
+	}
+}
+
+func TestCollectChannelStatusesMergesPluginStatusByManifestName(t *testing.T) {
+	clearModelsCLIEnv(t)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/channels" {
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+		_ = json.NewEncoder(w).Encode([]map[string]any{
+			{
+				"name":    "matrix-channel",
+				"enabled": true,
+				"running": true,
+				"healthy": true,
+			},
+		})
+	}))
+	defer server.Close()
+
+	pluginsDir := filepath.Join(t.TempDir(), "plugins")
+	pluginDir := filepath.Join(pluginsDir, "matrix-channel")
+	if err := os.MkdirAll(pluginDir, 0o755); err != nil {
+		t.Fatalf("mkdir plugin dir: %v", err)
+	}
+	manifest := `{
+  "name": "matrix-channel",
+  "enabled": true,
+  "channel": {
+    "name": "matrix",
+    "description": "Matrix channel"
+  }
+}`
+	if err := os.WriteFile(filepath.Join(pluginDir, "plugin.json"), []byte(manifest), 0o644); err != nil {
+		t.Fatalf("write plugin manifest: %v", err)
+	}
+
+	cfg := gatewayTestConfigFromURL(t, server.URL)
+	cfg.Plugins.Dir = pluginsDir
+	cfg.Plugins.RequireTrust = false
+
+	configPath := filepath.Join(t.TempDir(), "anyclaw.json")
+	if err := cfg.Save(configPath); err != nil {
+		t.Fatalf("save config: %v", err)
+	}
+
+	_, items, reachable, err := collectChannelStatuses(configPath, true)
+	if err != nil {
+		t.Fatalf("collectChannelStatuses: %v", err)
+	}
+	if !reachable {
+		t.Fatal("expected gateway to be reachable")
+	}
+	if len(items) != 6 {
+		t.Fatalf("expected merged plugin status to keep 6 items, got %#v", items)
+	}
+
+	foundMatrix := false
+	for _, item := range items {
+		if item.Name == "matrix-channel" && item.Enabled && item.Running && item.Healthy {
+			foundMatrix = true
+			break
+		}
+	}
+	if !foundMatrix {
+		t.Fatalf("expected merged matrix-channel status, got %#v", items)
 	}
 }
 
