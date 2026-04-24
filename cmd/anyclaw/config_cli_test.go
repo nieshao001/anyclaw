@@ -186,3 +186,70 @@ func TestRunConfigValidateJSON(t *testing.T) {
 		t.Fatalf("expected path in payload, got %#v", payload)
 	}
 }
+
+func TestRunConfigValidateUsesPersistedLoadNormalization(t *testing.T) {
+	clearModelsCLIEnv(t)
+
+	configPath := filepath.Join(t.TempDir(), "anyclaw.json")
+	data := []byte(`{
+  "gateway": {
+    "control_ui": {
+      "base_path": "console/"
+    }
+  }
+}`)
+	if err := os.WriteFile(configPath, data, 0o644); err != nil {
+		t.Fatalf("WriteFile config: %v", err)
+	}
+
+	stdout, _, err := captureCLIOutput(t, func() error {
+		return runConfigCommand([]string{"validate", "--config", configPath, "--json"})
+	})
+	if err != nil {
+		t.Fatalf("runConfigCommand validate: %v", err)
+	}
+
+	var payload struct {
+		OK bool `json:"ok"`
+	}
+	if err := json.Unmarshal([]byte(stdout), &payload); err != nil {
+		t.Fatalf("Unmarshal output: %v\noutput=%s", err, stdout)
+	}
+	if !payload.OK {
+		t.Fatalf("expected normalized config to validate, got %#v", payload)
+	}
+}
+
+func TestRunConfigSetUsesPersistedLoadNormalization(t *testing.T) {
+	clearModelsCLIEnv(t)
+
+	configPath := filepath.Join(t.TempDir(), "anyclaw.json")
+	data := []byte(`{
+  "gateway": {
+    "control_ui": {
+      "base_path": "console/"
+    }
+  }
+}`)
+	if err := os.WriteFile(configPath, data, 0o644); err != nil {
+		t.Fatalf("WriteFile config: %v", err)
+	}
+
+	_, _, err := captureCLIOutput(t, func() error {
+		return runConfigCommand([]string{"set", "--config", configPath, "llm.model", "gpt-5"})
+	})
+	if err != nil {
+		t.Fatalf("runConfigCommand set: %v", err)
+	}
+
+	loaded, err := config.LoadPersisted(configPath)
+	if err != nil {
+		t.Fatalf("LoadPersisted config: %v", err)
+	}
+	if loaded.Gateway.ControlUI.BasePath != "/console" {
+		t.Fatalf("expected normalized base path /console, got %q", loaded.Gateway.ControlUI.BasePath)
+	}
+	if loaded.LLM.Model != "gpt-5" {
+		t.Fatalf("expected llm.model to be updated, got %q", loaded.LLM.Model)
+	}
+}

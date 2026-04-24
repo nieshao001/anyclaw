@@ -100,7 +100,7 @@ func runConfigSet(args []string) error {
 	if !ok {
 		return fmt.Errorf("config root must remain an object")
 	}
-	if err := validateConfigDocument(root); err != nil {
+	if err := validateConfigDocument(*configPath, root); err != nil {
 		return err
 	}
 	if err := saveConfigDocument(*configPath, root); err != nil {
@@ -141,7 +141,7 @@ func runConfigUnset(args []string) error {
 	if !ok {
 		return fmt.Errorf("config root must remain an object")
 	}
-	if err := validateConfigDocument(root); err != nil {
+	if err := validateConfigDocument(*configPath, root); err != nil {
 		return err
 	}
 	if err := saveConfigDocument(*configPath, root); err != nil {
@@ -182,7 +182,7 @@ func runConfigValidate(args []string) error {
 		}
 		return err
 	}
-	if err := validateConfigDocument(doc); err != nil {
+	if err := validateConfigDocument(*configPath, doc); err != nil {
 		if *jsonOut {
 			_ = writePrettyJSON(map[string]any{
 				"ok":    false,
@@ -269,18 +269,39 @@ func saveConfigDocument(path string, doc map[string]any) error {
 	return os.WriteFile(resolvedPath, data, 0o644)
 }
 
-func validateConfigDocument(doc map[string]any) error {
-	cfg := config.DefaultConfig()
-	if len(doc) > 0 {
-		data, err := json.Marshal(doc)
-		if err != nil {
-			return err
-		}
-		if err := json.Unmarshal(data, cfg); err != nil {
-			return fmt.Errorf("config parse failed: %w", err)
+func validateConfigDocument(configPath string, doc map[string]any) error {
+	data, err := json.Marshal(doc)
+	if err != nil {
+		return err
+	}
+
+	resolvedPath := config.ResolveConfigPath(configPath)
+	tempDir := ""
+	if dir := filepath.Dir(resolvedPath); dir != "" && dir != "." {
+		if info, statErr := os.Stat(dir); statErr == nil && info.IsDir() {
+			tempDir = dir
 		}
 	}
-	return cfg.Validate()
+
+	tempFile, err := os.CreateTemp(tempDir, filepath.Base(resolvedPath)+".validate-*.json")
+	if err != nil {
+		return err
+	}
+	tempPath := tempFile.Name()
+	defer func() {
+		_ = tempFile.Close()
+		_ = os.Remove(tempPath)
+	}()
+
+	if _, err := tempFile.Write(data); err != nil {
+		return err
+	}
+	if err := tempFile.Close(); err != nil {
+		return err
+	}
+
+	_, err = config.LoadPersisted(tempPath)
+	return err
 }
 
 func writeConfigValue(value any) error {
