@@ -25,6 +25,8 @@ func runAnyClawCLI(args []string) error {
 		return nil
 	case "mcp":
 		return runMCPCommand(args[1:])
+	case "models":
+		return runModelsCommand(args[1:])
 	case "plugin":
 		return runPluginCommand(args[1:])
 	default:
@@ -37,6 +39,7 @@ func printCLIUsage() {
 	fmt.Print(`AnyClaw commands:
 Usage:
   anyclaw mcp <subcommand>            Run MCP-related commands
+  anyclaw models <subcommand>         Run model management commands
   anyclaw plugin <subcommand>         Run plugin management commands
 `)
 }
