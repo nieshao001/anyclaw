@@ -62,7 +62,10 @@ func runSkillSearch(args []string) error {
 	fmt.Printf("Searching skills.sh: %s\n", query)
 
 	results, err := searchRemoteSkills(context.Background(), query, 10)
-	if err != nil || len(results) == 0 {
+	if err != nil {
+		return fmt.Errorf("remote skill search failed: %w", err)
+	}
+	if len(results) == 0 {
 		showBuiltinSkillsHelp()
 		return nil
 	}

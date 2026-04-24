@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"sort"
@@ -114,6 +115,23 @@ func TestRunSkillSearchFallsBackToBuiltins(t *testing.T) {
 	}
 	if builtin := firstBuiltinSkillName(t); !strings.Contains(stdout, builtin) {
 		t.Fatalf("expected builtin skill %q in output, got %q", builtin, stdout)
+	}
+}
+
+func TestRunSkillSearchReturnsRemoteErrors(t *testing.T) {
+	clearSkillCLIEnv(t)
+	withSkillSearchStub(t, func(context.Context, string, int) ([]skills.SkillSearchResult, error) {
+		return nil, errors.New("upstream timeout")
+	})
+
+	stdout, _, err := captureCLIOutput(t, func() error {
+		return runSkillCommand([]string{"search", "planner"})
+	})
+	if err == nil || !strings.Contains(err.Error(), "remote skill search failed") || !strings.Contains(err.Error(), "upstream timeout") {
+		t.Fatalf("expected propagated remote search error, got %v", err)
+	}
+	if strings.Contains(stdout, "Built-in skills:") {
+		t.Fatalf("expected remote search errors to avoid builtin fallback, got %q", stdout)
 	}
 }
 
