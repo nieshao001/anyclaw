@@ -77,20 +77,11 @@ async function requestJSON<T>(input: string, init?: RequestInit): Promise<T> {
   });
 
   const text = await response.text();
-  let payload: T | { error?: string } | string | null = null;
-  if (text !== "") {
-    try {
-      payload = JSON.parse(text) as T | { error?: string };
-    } catch {
-      payload = text;
-    }
-  }
+  const payload = text === "" ? null : (JSON.parse(text) as T | { error?: string });
 
   if (!response.ok) {
     const message =
-      typeof payload === "string" && payload.trim() !== ""
-        ? payload.trim()
-        : payload && typeof payload === "object" && "error" in payload && typeof payload.error === "string"
+      payload && typeof payload === "object" && "error" in payload && typeof payload.error === "string"
         ? payload.error
         : `${response.status} ${response.statusText}`.trim();
 
