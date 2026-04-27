@@ -1,6 +1,8 @@
 package canvas
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -150,7 +152,11 @@ func (s *CanvasStore) Push(id string, name string, content string, contentType s
 	now := time.Now().UTC()
 
 	if strings.TrimSpace(id) == "" {
-		id = fmt.Sprintf("canvas-%d", now.UnixMilli())
+		generatedID, err := generateCanvasID(now)
+		if err != nil {
+			return nil, err
+		}
+		id = generatedID
 	}
 	if err := validateCanvasID(id); err != nil {
 		return nil, err
@@ -381,4 +387,12 @@ func validateCanvasID(id string) error {
 		return fmt.Errorf("invalid canvas id: %q", id)
 	}
 	return nil
+}
+
+func generateCanvasID(now time.Time) (string, error) {
+	var suffix [8]byte
+	if _, err := rand.Read(suffix[:]); err != nil {
+		return "", fmt.Errorf("generate canvas id: %w", err)
+	}
+	return fmt.Sprintf("canvas-%d-%s", now.UnixMilli(), hex.EncodeToString(suffix[:])), nil
 }

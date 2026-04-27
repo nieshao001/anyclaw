@@ -271,6 +271,34 @@ func TestAutoIDGeneration(t *testing.T) {
 	}
 }
 
+func TestAutoIDGenerationDoesNotOverwriteSameMillisecondEntries(t *testing.T) {
+	dir := t.TempDir()
+	store, err := NewStore(dir, 5)
+	if err != nil {
+		t.Fatalf("NewStore failed: %v", err)
+	}
+
+	seen := make(map[string]bool)
+	for i := 0; i < 100; i++ {
+		entry, err := store.Push("", "Auto", "content", EntryTypeHTML, "agent-1")
+		if err != nil {
+			t.Fatalf("Push failed: %v", err)
+		}
+		if seen[entry.ID] {
+			t.Fatalf("duplicate auto-generated ID: %s", entry.ID)
+		}
+		seen[entry.ID] = true
+		if entry.Version != 1 {
+			t.Fatalf("expected auto-created entry version 1, got %d", entry.Version)
+		}
+	}
+
+	items := store.List()
+	if len(items) != 100 {
+		t.Fatalf("expected 100 independently created entries, got %d", len(items))
+	}
+}
+
 func TestPathTraversalProtection(t *testing.T) {
 	dir := t.TempDir()
 	store, err := NewStore(dir, 5)
