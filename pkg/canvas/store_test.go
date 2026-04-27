@@ -180,6 +180,68 @@ func TestVersionPruning(t *testing.T) {
 	}
 }
 
+func TestPushSurfacesVersionPersistenceFailure(t *testing.T) {
+	dir := t.TempDir()
+	store, err := NewStore(dir, 5)
+	if err != nil {
+		t.Fatalf("NewStore failed: %v", err)
+	}
+
+	_, err = store.Push("test-1", "Test", "v1", EntryTypeHTML, "agent-1")
+	if err != nil {
+		t.Fatalf("initial Push failed: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(store.BaseDir(), "versions"), []byte("not-a-dir"), 0o600); err != nil {
+		t.Fatalf("create versions path conflict: %v", err)
+	}
+
+	if _, err := store.Push("test-1", "Test", "v2", EntryTypeHTML, "agent-1"); err == nil {
+		t.Fatal("expected version persistence failure")
+	}
+
+	entry, ok := store.Get("test-1")
+	if !ok {
+		t.Fatal("entry missing after failed update")
+	}
+	if entry.Content != "v1" {
+		t.Fatalf("expected content to remain v1 after failed version save, got %q", entry.Content)
+	}
+	if entry.Version != 1 {
+		t.Fatalf("expected version to remain 1 after failed version save, got %d", entry.Version)
+	}
+}
+
+func TestResetSurfacesVersionPersistenceFailure(t *testing.T) {
+	dir := t.TempDir()
+	store, err := NewStore(dir, 5)
+	if err != nil {
+		t.Fatalf("NewStore failed: %v", err)
+	}
+
+	_, err = store.Push("test-1", "Test", "content", EntryTypeHTML, "agent-1")
+	if err != nil {
+		t.Fatalf("Push failed: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(store.BaseDir(), "versions"), []byte("not-a-dir"), 0o600); err != nil {
+		t.Fatalf("create versions path conflict: %v", err)
+	}
+
+	if err := store.Reset("test-1"); err == nil {
+		t.Fatal("expected version persistence failure")
+	}
+
+	entry, ok := store.Get("test-1")
+	if !ok {
+		t.Fatal("entry missing after failed reset")
+	}
+	if entry.Content != "content" {
+		t.Fatalf("expected content to remain after failed reset, got %q", entry.Content)
+	}
+	if entry.Version != 1 {
+		t.Fatalf("expected version to remain 1 after failed reset, got %d", entry.Version)
+	}
+}
+
 func TestStorePersistence(t *testing.T) {
 	dir := t.TempDir()
 

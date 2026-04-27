@@ -168,7 +168,9 @@ func (s *CanvasStore) Push(id string, name string, content string, contentType s
 
 	entry, exists := s.entries[id]
 	if exists {
-		s.saveVersionLocked(entry, agent)
+		if err := s.saveVersionLocked(entry, agent); err != nil {
+			return nil, err
+		}
 		entry.Content = content
 		entry.UpdatedAt = now
 		entry.Version++
@@ -195,10 +197,10 @@ func (s *CanvasStore) Push(id string, name string, content string, contentType s
 	return cloneEntry(entry), nil
 }
 
-func (s *CanvasStore) saveVersionLocked(entry *CanvasEntry, agent string) {
+func (s *CanvasStore) saveVersionLocked(entry *CanvasEntry, agent string) error {
 	vDir := s.versionDir(entry.ID)
 	if err := os.MkdirAll(vDir, 0o755); err != nil {
-		return
+		return fmt.Errorf("create canvas version dir: %w", err)
 	}
 
 	version := &CanvasVersion{
@@ -210,11 +212,13 @@ func (s *CanvasStore) saveVersionLocked(entry *CanvasEntry, agent string) {
 
 	data, err := json.MarshalIndent(version, "", "  ")
 	if err != nil {
-		return
+		return fmt.Errorf("marshal canvas version: %w", err)
 	}
 
 	versionFile := filepath.Join(vDir, fmt.Sprintf("v%d.json", entry.Version))
-	_ = os.WriteFile(versionFile, data, 0o644)
+	if err := os.WriteFile(versionFile, data, 0o644); err != nil {
+		return fmt.Errorf("write canvas version: %w", err)
+	}
 
 	if s.versions[entry.ID] == nil {
 		s.versions[entry.ID] = make([]*CanvasVersion, 0)
@@ -222,6 +226,7 @@ func (s *CanvasStore) saveVersionLocked(entry *CanvasEntry, agent string) {
 	s.versions[entry.ID] = append(s.versions[entry.ID], version)
 
 	s.pruneVersions(entry.ID)
+	return nil
 }
 
 func (s *CanvasStore) pruneVersions(id string) {
@@ -329,7 +334,9 @@ func (s *CanvasStore) Reset(id string) error {
 		return fmt.Errorf("canvas entry not found: %s", id)
 	}
 
-	s.saveVersionLocked(entry, "system")
+	if err := s.saveVersionLocked(entry, "system"); err != nil {
+		return err
+	}
 
 	entry.Content = ""
 	entry.UpdatedAt = time.Now().UTC()
