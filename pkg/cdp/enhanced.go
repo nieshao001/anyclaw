@@ -76,6 +76,7 @@ func (eb *EnhancedBrowser) SetUserAgent(ua string) {
 
 func (eb *EnhancedBrowser) ClearHeaders() {
 	eb.headers = nil
+	eb.userAgent = ""
 }
 
 func (eb *EnhancedBrowser) extraHTTPHeaders() (network.Headers, string) {

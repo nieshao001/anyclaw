@@ -142,6 +142,15 @@ func TestExtraHTTPHeadersSeparatesUserAgent(t *testing.T) {
 	if _, exists := gotHeaders["User-Agent"]; exists {
 		t.Fatal("unexpected User-Agent header in extra HTTP headers")
 	}
+
+	eb.ClearHeaders()
+	gotHeaders, gotUserAgent = eb.extraHTTPHeaders()
+	if gotHeaders != nil {
+		t.Fatalf("headers after ClearHeaders = %v, want nil", gotHeaders)
+	}
+	if gotUserAgent != "" {
+		t.Fatalf("user agent after ClearHeaders = %q, want empty", gotUserAgent)
+	}
 }
 
 func TestJSStringLiteralRoundTrip(t *testing.T) {
@@ -374,6 +383,9 @@ func TestEnhancedBrowserHelpersAndMethods(t *testing.T) {
 	eb.ClearHeaders()
 	if eb.headers != nil {
 		t.Fatal("expected headers to be cleared")
+	}
+	if eb.userAgent != "" {
+		t.Fatal("expected user agent to be cleared")
 	}
 	if err := eb.Close(); err != nil {
 		t.Fatalf("Close error = %v", err)
