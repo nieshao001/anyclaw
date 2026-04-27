@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"html/template"
+	"net/url"
 	"regexp"
 	"sort"
 	"strings"
@@ -258,20 +259,20 @@ func (r *A2UIRenderer) renderImage(comp A2UIComponent, indent string) (string, e
 	attrs := r.buildAttributes(comp, "", "")
 	src := ""
 	if s, ok := comp.Props["src"].(string); ok {
-		src = template.HTMLEscapeString(s)
+		src = sanitizeImageURL(s)
 	}
 	alt := ""
 	if a, ok := comp.Props["alt"].(string); ok {
 		alt = template.HTMLEscapeString(a)
 	}
-	return fmt.Sprintf("%s<img src=\"%s\" alt=\"%s\"%s>\n", indent, src, alt, attrs), nil
+	return fmt.Sprintf("%s<img src=\"%s\" alt=\"%s\"%s>\n", indent, template.HTMLEscapeString(src), alt, attrs), nil
 }
 
 func (r *A2UIRenderer) renderLink(comp A2UIComponent, indent string) (string, error) {
 	attrs := r.buildAttributes(comp, "", "")
 	href := "#"
 	if value, ok := comp.Props["href"].(string); ok && strings.TrimSpace(value) != "" {
-		href = value
+		href = sanitizeLinkURL(value)
 	}
 	content := template.HTMLEscapeString(comp.Content)
 	if content == "" {
@@ -683,6 +684,50 @@ func firstNonEmptyTheme(values ...string) string {
 		}
 	}
 	return ""
+}
+
+func sanitizeLinkURL(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return "#"
+	}
+	if isSafeA2UIURL(raw, map[string]bool{
+		"http":   true,
+		"https":  true,
+		"mailto": true,
+	}) {
+		return raw
+	}
+	return "#"
+}
+
+func sanitizeImageURL(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return ""
+	}
+	if isSafeA2UIURL(raw, map[string]bool{
+		"http":  true,
+		"https": true,
+	}) {
+		return raw
+	}
+	return ""
+}
+
+func isSafeA2UIURL(raw string, allowedSchemes map[string]bool) bool {
+	if strings.ContainsAny(raw, "\x00\r\n\t") {
+		return false
+	}
+
+	parsed, err := url.Parse(raw)
+	if err != nil {
+		return false
+	}
+	if parsed.Scheme == "" {
+		return parsed.Host == ""
+	}
+	return allowedSchemes[strings.ToLower(parsed.Scheme)]
 }
 
 func ParseA2UI(content string) (*A2UIDocument, error) {

@@ -446,6 +446,106 @@ func TestA2UIEscapesAttributesAndRejectsUnsafeNames(t *testing.T) {
 	}
 }
 
+func TestA2UIValidatesRenderedURISchemes(t *testing.T) {
+	renderer := NewA2UIRenderer()
+	html, err := renderer.Render(&A2UIDocument{
+		Title: "Links",
+		Components: []A2UIComponent{
+			{
+				Type:    "link",
+				Content: "Safe HTTP",
+				Props: map[string]any{
+					"href": "https://example.com/docs",
+				},
+			},
+			{
+				Type:    "link",
+				Content: "Safe Mail",
+				Props: map[string]any{
+					"href": "mailto:hello@example.com",
+				},
+			},
+			{
+				Type:    "link",
+				Content: "Safe Relative",
+				Props: map[string]any{
+					"href": "/docs/getting-started#intro",
+				},
+			},
+			{
+				Type:    "link",
+				Content: "Unsafe JS",
+				Props: map[string]any{
+					"href": "javascript:alert(1)",
+				},
+			},
+			{
+				Type:    "link",
+				Content: "Unsafe Data",
+				Props: map[string]any{
+					"href": "data:text/html,<script>alert(1)</script>",
+				},
+			},
+			{
+				Type:    "link",
+				Content: "Protocol Relative",
+				Props: map[string]any{
+					"href": "//example.com/path",
+				},
+			},
+			{
+				Type: "image",
+				Props: map[string]any{
+					"src": "https://example.com/image.png",
+					"alt": "safe",
+				},
+			},
+			{
+				Type: "image",
+				Props: map[string]any{
+					"src": "./images/local.png",
+					"alt": "relative",
+				},
+			},
+			{
+				Type: "image",
+				Props: map[string]any{
+					"src": "javascript:alert(1)",
+					"alt": "bad js",
+				},
+			},
+			{
+				Type: "image",
+				Props: map[string]any{
+					"src": "data:text/html,<script>alert(1)</script>",
+					"alt": "bad data",
+				},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Render failed: %v", err)
+	}
+
+	if !containsAll(html, []string{
+		`<a href="https://example.com/docs">Safe HTTP</a>`,
+		`<a href="mailto:hello@example.com">Safe Mail</a>`,
+		`<a href="/docs/getting-started#intro">Safe Relative</a>`,
+		`<a href="#">Unsafe JS</a>`,
+		`<a href="#">Unsafe Data</a>`,
+		`<a href="#">Protocol Relative</a>`,
+		`<img src="https://example.com/image.png" alt="safe">`,
+		`<img src="./images/local.png" alt="relative">`,
+		`<img src="" alt="bad js">`,
+		`<img src="" alt="bad data">`,
+	}) {
+		t.Fatalf("rendered HTML missing expected safe URI output:\n%s", html)
+	}
+	if strings.Contains(html, "javascript:") || strings.Contains(html, "data:text/html") || strings.Contains(html, "//example.com/path") {
+		t.Fatalf("rendered HTML leaked unsafe URI:\n%s", html)
+	}
+}
+
 func TestA2UIMergesBuiltInAndCallerAttributes(t *testing.T) {
 	renderer := NewA2UIRenderer()
 	html, err := renderer.Render(&A2UIDocument{
