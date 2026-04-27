@@ -50,16 +50,33 @@ func TestRegistryReturnsDefensiveCopies(t *testing.T) {
 			Version:  "1.0.0",
 			Kind:     "tool",
 			Channels: []string{"original"},
+			ConfigSchema: map[string]any{
+				"properties": map[string]any{
+					"token": map[string]any{
+						"type": "string",
+					},
+				},
+				"required": []any{"token"},
+			},
 		},
 		Enabled: true,
-		Config:  map[string]any{"mode": "safe"},
+		Config: map[string]any{
+			"mode": "safe",
+			"nested": map[string]any{
+				"level": "one",
+			},
+			"steps": []any{"prepare", map[string]any{"name": "run"}},
+		},
 	}
 	if err := registry.Register(ext); err != nil {
 		t.Fatalf("Register: %v", err)
 	}
 
 	ext.Manifest.Name = "mutated"
+	ext.Manifest.ConfigSchema["required"].([]any)[0] = "mutated"
 	ext.Config["mode"] = "changed"
+	ext.Config["nested"].(map[string]any)["level"] = "mutated"
+	ext.Config["steps"].([]any)[1].(map[string]any)["name"] = "mutated"
 
 	got, ok := registry.Get("custom")
 	if !ok {
@@ -67,7 +84,10 @@ func TestRegistryReturnsDefensiveCopies(t *testing.T) {
 	}
 	got.Manifest.Name = "external mutation"
 	got.Manifest.Channels[0] = "changed"
+	got.Manifest.ConfigSchema["properties"].(map[string]any)["token"].(map[string]any)["type"] = "integer"
 	got.Config["mode"] = "external"
+	got.Config["nested"].(map[string]any)["level"] = "external"
+	got.Config["steps"].([]any)[1].(map[string]any)["name"] = "external"
 
 	again, ok := registry.Get("custom")
 	if !ok {
@@ -79,8 +99,23 @@ func TestRegistryReturnsDefensiveCopies(t *testing.T) {
 	if again.Manifest.Channels[0] != "original" {
 		t.Fatalf("expected stored channel to remain original, got %q", again.Manifest.Channels[0])
 	}
+	required := again.Manifest.ConfigSchema["required"].([]any)
+	if required[0] != "token" {
+		t.Fatalf("expected stored schema required value to remain token, got %v", required[0])
+	}
+	tokenType := again.Manifest.ConfigSchema["properties"].(map[string]any)["token"].(map[string]any)["type"]
+	if tokenType != "string" {
+		t.Fatalf("expected stored schema token type to remain string, got %v", tokenType)
+	}
 	if again.Config["mode"] != "safe" {
 		t.Fatalf("expected stored config to remain safe, got %v", again.Config["mode"])
+	}
+	if again.Config["nested"].(map[string]any)["level"] != "one" {
+		t.Fatalf("expected nested config to remain one, got %v", again.Config["nested"].(map[string]any)["level"])
+	}
+	step := again.Config["steps"].([]any)[1].(map[string]any)["name"]
+	if step != "run" {
+		t.Fatalf("expected nested slice config to remain run, got %v", step)
 	}
 }
 

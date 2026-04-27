@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"sort"
 	"strings"
 	"sync"
@@ -331,15 +332,11 @@ func cloneExtension(ext *Extension) *Extension {
 	if ext == nil {
 		return nil
 	}
-	config := make(map[string]any, len(ext.Config))
-	for k, v := range ext.Config {
-		config[k] = v
-	}
 	return &Extension{
 		Manifest: cloneManifest(ext.Manifest),
 		Path:     ext.Path,
 		Enabled:  ext.Enabled,
-		Config:   config,
+		Config:   cloneMap(ext.Config),
 	}
 }
 
@@ -358,7 +355,54 @@ func cloneMap(input map[string]any) map[string]any {
 	}
 	output := make(map[string]any, len(input))
 	for k, v := range input {
-		output[k] = v
+		output[k] = cloneValue(v)
 	}
 	return output
+}
+
+func cloneValue(value any) any {
+	if value == nil {
+		return nil
+	}
+	return cloneReflect(reflect.ValueOf(value)).Interface()
+}
+
+func cloneReflect(value reflect.Value) reflect.Value {
+	switch value.Kind() {
+	case reflect.Interface:
+		if value.IsNil() {
+			return reflect.Zero(value.Type())
+		}
+		cloned := cloneReflect(value.Elem())
+		wrapped := reflect.New(value.Type()).Elem()
+		wrapped.Set(cloned)
+		return wrapped
+	case reflect.Map:
+		if value.IsNil() {
+			return reflect.Zero(value.Type())
+		}
+		cloned := reflect.MakeMapWithSize(value.Type(), value.Len())
+		iter := value.MapRange()
+		for iter.Next() {
+			cloned.SetMapIndex(cloneReflect(iter.Key()), cloneReflect(iter.Value()))
+		}
+		return cloned
+	case reflect.Slice:
+		if value.IsNil() {
+			return reflect.Zero(value.Type())
+		}
+		cloned := reflect.MakeSlice(value.Type(), value.Len(), value.Len())
+		for i := 0; i < value.Len(); i++ {
+			cloned.Index(i).Set(cloneReflect(value.Index(i)))
+		}
+		return cloned
+	case reflect.Array:
+		cloned := reflect.New(value.Type()).Elem()
+		for i := 0; i < value.Len(); i++ {
+			cloned.Index(i).Set(cloneReflect(value.Index(i)))
+		}
+		return cloned
+	default:
+		return value
+	}
 }
