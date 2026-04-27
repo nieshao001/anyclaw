@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"html/template"
+	"regexp"
 	"strings"
 )
 
@@ -30,6 +31,8 @@ type A2UIDocument struct {
 type A2UIRenderer struct {
 	themeStyles map[string]string
 }
+
+var htmlNamePattern = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9:_-]*$`)
 
 func NewA2UIRenderer() *A2UIRenderer {
 	return &A2UIRenderer{
@@ -227,6 +230,7 @@ func (r *A2UIRenderer) renderInput(comp A2UIComponent, indent string) (string, e
 	if t, ok := comp.Props["inputType"].(string); ok {
 		inputType = t
 	}
+	inputType = template.HTMLEscapeString(inputType)
 	placeholder := ""
 	if p, ok := comp.Props["placeholder"].(string); ok {
 		placeholder = fmt.Sprintf(" placeholder=\"%s\"", template.HTMLEscapeString(p))
@@ -240,6 +244,7 @@ func (r *A2UIRenderer) renderTextarea(comp A2UIComponent, indent string) (string
 	if value, ok := comp.Props["rows"].(string); ok && strings.TrimSpace(value) != "" {
 		rows = value
 	}
+	rows = template.HTMLEscapeString(rows)
 	placeholder := ""
 	if p, ok := comp.Props["placeholder"].(string); ok {
 		placeholder = fmt.Sprintf(" placeholder=\"%s\"", template.HTMLEscapeString(p))
@@ -312,6 +317,7 @@ func (r *A2UIRenderer) renderGrid(comp A2UIComponent, indent string) (string, er
 	if c, ok := comp.Props["columns"].(string); ok {
 		cols = c
 	}
+	cols = template.HTMLEscapeString(cols)
 	style := fmt.Sprintf(" style=\"display:grid;grid-template-columns:repeat(%s,1fr);gap:16px;\"", cols)
 	var sb strings.Builder
 	sb.WriteString(fmt.Sprintf("%s<div class=\"a2ui-grid\"%s%s>\n", indent, style, attrs))
@@ -370,10 +376,12 @@ func (r *A2UIRenderer) renderProgress(comp A2UIComponent, indent string) (string
 	if v, ok := comp.Props["value"].(string); ok {
 		value = v
 	}
+	value = template.HTMLEscapeString(value)
 	max := "100"
 	if m, ok := comp.Props["max"].(string); ok {
 		max = m
 	}
+	max = template.HTMLEscapeString(max)
 	return fmt.Sprintf("%s<progress value=\"%s\" max=\"%s\"%s></progress>\n", indent, value, max, attrs), nil
 }
 
@@ -389,6 +397,7 @@ func (r *A2UIRenderer) renderAlert(comp A2UIComponent, indent string) (string, e
 	if l, ok := comp.Props["level"].(string); ok {
 		level = l
 	}
+	level = template.HTMLEscapeString(level)
 	content := template.HTMLEscapeString(comp.Content)
 	return fmt.Sprintf("%s<div class=\"a2ui-alert a2ui-alert-%s\"%s>%s</div>\n", indent, level, attrs, content), nil
 }
@@ -396,7 +405,9 @@ func (r *A2UIRenderer) renderAlert(comp A2UIComponent, indent string) (string, e
 func (r *A2UIRenderer) renderGeneric(comp A2UIComponent, indent string) (string, error) {
 	tag := "div"
 	if t, ok := comp.Props["tag"].(string); ok {
-		tag = t
+		if isSafeHTMLName(t) {
+			tag = t
+		}
 	}
 	attrs := r.buildAttributes(comp)
 	content := template.HTMLEscapeString(comp.Content)
@@ -409,17 +420,20 @@ func (r *A2UIRenderer) buildAttributes(comp A2UIComponent) string {
 	if comp.Styles != nil && len(comp.Styles) > 0 {
 		sb.WriteString(" style=\"")
 		for k, v := range comp.Styles {
-			sb.WriteString(fmt.Sprintf("%s:%s;", k, v))
+			if !isSafeCSSName(k) {
+				continue
+			}
+			sb.WriteString(fmt.Sprintf("%s:%s;", template.HTMLEscapeString(k), template.HTMLEscapeString(v)))
 		}
 		sb.WriteString("\"")
 	}
 
 	if comp.Attributes != nil {
 		for k, v := range comp.Attributes {
-			if k == "style" {
+			if k == "style" || !isSafeAttributeName(k) {
 				continue
 			}
-			sb.WriteString(fmt.Sprintf(" %s=\"%v\"", k, v))
+			sb.WriteString(fmt.Sprintf(" %s=\"%s\"", k, template.HTMLEscapeString(fmt.Sprintf("%v", v))))
 		}
 	}
 
@@ -437,6 +451,24 @@ func (r *A2UIRenderer) buildAttributes(comp A2UIComponent) string {
 	}
 
 	return sb.String()
+}
+
+func isSafeHTMLName(name string) bool {
+	name = strings.TrimSpace(name)
+	return htmlNamePattern.MatchString(name)
+}
+
+func isSafeAttributeName(name string) bool {
+	name = strings.TrimSpace(name)
+	return isSafeHTMLName(name) && !strings.HasPrefix(strings.ToLower(name), "on")
+}
+
+func isSafeCSSName(name string) bool {
+	name = strings.TrimSpace(name)
+	if strings.HasPrefix(name, "--") {
+		return htmlNamePattern.MatchString("x" + name)
+	}
+	return htmlNamePattern.MatchString(name)
 }
 
 func (r *A2UIRenderer) componentStyles() string {

@@ -278,6 +278,19 @@ func TestPathTraversalProtection(t *testing.T) {
 		t.Fatalf("NewStore failed: %v", err)
 	}
 
+	if _, err := store.Push("../escape", "Escape", "content", EntryTypeHTML, "agent-1"); err == nil {
+		t.Fatal("expected path traversal id to be rejected")
+	}
+	if _, err := store.Push(`nested\escape`, "Escape", "content", EntryTypeHTML, "agent-1"); err == nil {
+		t.Fatal("expected backslash path id to be rejected")
+	}
+	if err := store.Delete("../escape"); err == nil {
+		t.Fatal("expected invalid delete id to be rejected")
+	}
+	if err := store.Reset("../escape"); err == nil {
+		t.Fatal("expected invalid reset id to be rejected")
+	}
+
 	entryDir := filepath.Join(store.BaseDir(), "entries")
 	if err := os.MkdirAll(entryDir, 0o755); err != nil {
 		t.Fatalf("mkdir failed: %v", err)
@@ -289,6 +302,57 @@ func TestPathTraversalProtection(t *testing.T) {
 	}
 	if len(entries) != 0 {
 		t.Fatalf("expected empty entries dir, got %d files", len(entries))
+	}
+}
+
+func TestA2UIEscapesAttributesAndRejectsUnsafeNames(t *testing.T) {
+	renderer := NewA2UIRenderer()
+	html, err := renderer.Render(&A2UIDocument{
+		Title: "Unsafe",
+		Components: []A2UIComponent{
+			{
+				Type:    "input",
+				Content: "ignored",
+				Props: map[string]any{
+					"inputType": `text" autofocus`,
+				},
+				Attributes: map[string]any{
+					`onclick`:       "alert(1)",
+					`bad name`:      "bad",
+					`data-title`:    `hello "quoted"`,
+					`x" onfocus="x`: "bad",
+				},
+				Styles: map[string]string{
+					"color":       `red";background:url(x)`,
+					`bad name`:    "bad",
+					"--accent":    "#0f766e",
+					"font-weight": "700",
+				},
+			},
+			{
+				Type: "unknown",
+				Props: map[string]any{
+					"tag": `script onclick="bad"`,
+				},
+				Content: `<hello>`,
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Render failed: %v", err)
+	}
+
+	if strings.Contains(html, "bad name") || strings.Contains(html, `x" onfocus`) {
+		t.Fatalf("expected unsafe attribute/style names to be skipped:\n%s", html)
+	}
+	if !strings.Contains(html, `data-title="hello &#34;quoted&#34;"`) {
+		t.Fatalf("expected attribute value to be escaped:\n%s", html)
+	}
+	if strings.Contains(html, `<script`) {
+		t.Fatalf("expected unsafe generic tag to fall back to div:\n%s", html)
+	}
+	if !strings.Contains(html, `&lt;hello&gt;`) {
+		t.Fatalf("expected generic content to be escaped:\n%s", html)
 	}
 }
 

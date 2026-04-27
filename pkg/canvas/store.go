@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"sync"
@@ -43,6 +44,8 @@ const (
 	EntryTypeJSON = "json"
 	EntryTypeText = "text"
 )
+
+var canvasIDPattern = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
 
 func NewStore(baseDir string, maxVersions int) (*CanvasStore, error) {
 	if maxVersions <= 0 {
@@ -101,6 +104,9 @@ func (s *CanvasStore) load() error {
 		if err := json.Unmarshal(data, &ce); err != nil {
 			continue
 		}
+		if err := validateCanvasID(ce.ID); err != nil {
+			continue
+		}
 		s.entries[ce.ID] = &ce
 		s.loadVersions(ce.ID)
 	}
@@ -145,6 +151,9 @@ func (s *CanvasStore) Push(id string, name string, content string, contentType s
 
 	if strings.TrimSpace(id) == "" {
 		id = fmt.Sprintf("canvas-%d", now.UnixMilli())
+	}
+	if err := validateCanvasID(id); err != nil {
+		return nil, err
 	}
 
 	if strings.TrimSpace(contentType) == "" {
@@ -224,6 +233,10 @@ func (s *CanvasStore) pruneVersions(id string) {
 }
 
 func (s *CanvasStore) saveEntry(entry *CanvasEntry) error {
+	if err := validateCanvasID(entry.ID); err != nil {
+		return err
+	}
+
 	entryDir := s.entryDir()
 	if err := os.MkdirAll(entryDir, 0o755); err != nil {
 		return err
@@ -301,6 +314,10 @@ func (s *CanvasStore) Reset(id string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	if err := validateCanvasID(id); err != nil {
+		return err
+	}
+
 	entry, ok := s.entries[id]
 	if !ok {
 		return fmt.Errorf("canvas entry not found: %s", id)
@@ -318,6 +335,10 @@ func (s *CanvasStore) Reset(id string) error {
 func (s *CanvasStore) Delete(id string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
+	if err := validateCanvasID(id); err != nil {
+		return err
+	}
 
 	delete(s.entries, id)
 
@@ -349,4 +370,15 @@ func cloneVersion(v *CanvasVersion) *CanvasVersion {
 	}
 	clone := *v
 	return &clone
+}
+
+func validateCanvasID(id string) error {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return fmt.Errorf("canvas id is required")
+	}
+	if id == "." || id == ".." || !canvasIDPattern.MatchString(id) {
+		return fmt.Errorf("invalid canvas id: %q", id)
+	}
+	return nil
 }
