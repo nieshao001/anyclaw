@@ -3,9 +3,43 @@ package vision
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 )
+
+type testVisionProvider struct {
+	analyzeImageFunc func(ctx context.Context, imageData []byte, mimeType string) (*AnalysisResult, error)
+	analyzeImageHit  bool
+}
+
+func (p *testVisionProvider) Name() string {
+	return "test"
+}
+
+func (p *testVisionProvider) AnalyzeImage(ctx context.Context, imageData []byte, mimeType string) (*AnalysisResult, error) {
+	p.analyzeImageHit = true
+	if p.analyzeImageFunc != nil {
+		return p.analyzeImageFunc(ctx, imageData, mimeType)
+	}
+	return &AnalysisResult{}, nil
+}
+
+func (p *testVisionProvider) AnalyzeImageURL(ctx context.Context, imageURL string) (*AnalysisResult, error) {
+	return nil, errors.New("not implemented")
+}
+
+func (p *testVisionProvider) OCR(ctx context.Context, imageData []byte, mimeType string) ([]DetectedText, error) {
+	return nil, errors.New("not implemented")
+}
+
+func (p *testVisionProvider) LabelImage(ctx context.Context, imageData []byte, mimeType string) ([]Label, error) {
+	return nil, errors.New("not implemented")
+}
+
+func (p *testVisionProvider) DetectObjects(ctx context.Context, imageData []byte, mimeType string) ([]DetectedObject, error) {
+	return nil, errors.New("not implemented")
+}
 
 func TestImageDataURLRoundTrip(t *testing.T) {
 	data := []byte("image-bytes")
@@ -59,6 +93,56 @@ func TestAnalyzeMediaRejectsUnsupportedType(t *testing.T) {
 	pipeline := NewMediaUnderstandingPipeline(DefaultMediaUnderstandingConfig())
 	if _, err := AnalyzeMedia(context.Background(), pipeline, []byte("x"), "application/json"); err == nil {
 		t.Fatal("expected unsupported media type error")
+	}
+}
+
+func TestUnderstandImageRejectsOversizedEncodedImage(t *testing.T) {
+	provider := &testVisionProvider{}
+	pipeline := NewMediaUnderstandingPipeline(MediaUnderstandingConfig{
+		VisionProvider: provider,
+		MaxImageSize:   4,
+		Timeout:        DefaultMediaUnderstandingConfig().Timeout,
+	})
+
+	_, err := pipeline.UnderstandImage(context.Background(), []byte("12345"), "image/png")
+	if err == nil {
+		t.Fatal("expected oversized image to fail")
+	}
+	if !strings.Contains(err.Error(), "image too large") {
+		t.Fatalf("expected image size error, got %v", err)
+	}
+	if provider.analyzeImageHit {
+		t.Fatal("expected provider not to be called for oversized image")
+	}
+}
+
+func TestUnderstandImageCallsProviderForValidSizedImage(t *testing.T) {
+	provider := &testVisionProvider{
+		analyzeImageFunc: func(ctx context.Context, imageData []byte, mimeType string) (*AnalysisResult, error) {
+			return &AnalysisResult{
+				Description: "a cat",
+				Labels:      []Label{{Name: "cat"}, {Name: "pet"}},
+			}, nil
+		},
+	}
+	pipeline := NewMediaUnderstandingPipeline(MediaUnderstandingConfig{
+		VisionProvider: provider,
+		MaxImageSize:   16,
+		Timeout:        DefaultMediaUnderstandingConfig().Timeout,
+	})
+
+	result, err := pipeline.UnderstandImage(context.Background(), []byte("12345"), "image/png")
+	if err != nil {
+		t.Fatalf("UnderstandImage: %v", err)
+	}
+	if !provider.analyzeImageHit {
+		t.Fatal("expected provider to be called")
+	}
+	if result.Description != "a cat" {
+		t.Fatalf("expected description %q, got %q", "a cat", result.Description)
+	}
+	if result.Summary != "cat, pet" {
+		t.Fatalf("expected summary %q, got %q", "cat, pet", result.Summary)
 	}
 }
 

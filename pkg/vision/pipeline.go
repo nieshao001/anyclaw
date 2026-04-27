@@ -46,8 +46,8 @@ func NewMediaUnderstandingPipeline(cfg MediaUnderstandingConfig) *MediaUnderstan
 }
 
 func (p *MediaUnderstandingPipeline) UnderstandImage(ctx context.Context, imageData []byte, mimeType string) (*MediaUnderstandingResult, error) {
-	if len(imageData) > p.cfg.MaxImageSize {
-		imageData = imageData[:p.cfg.MaxImageSize]
+	if p.cfg.MaxImageSize > 0 && len(imageData) > p.cfg.MaxImageSize {
+		return nil, fmt.Errorf("image too large: %d bytes exceeds max %d", len(imageData), p.cfg.MaxImageSize)
 	}
 
 	ctx, cancel := context.WithTimeout(ctx, p.cfg.Timeout)
