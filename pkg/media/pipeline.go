@@ -25,6 +25,12 @@ type MediaPipeline struct {
 	stats      MediaPipelineStats
 }
 
+type inflightDownload struct {
+	done  chan struct{}
+	media *Media
+	err   error
+}
+
 type MediaPipelineConfig struct {
 	Enabled          bool
 	MaxDownloadSize  int64
@@ -232,8 +238,10 @@ func (p *MediaPipeline) DownloadWithOptions(ctx context.Context, req *MediaDownl
 		}
 	}
 
-	_, inflight := p.inflight.LoadOrStore(cacheKey, make(chan struct{}))
+	call := &inflightDownload{done: make(chan struct{})}
+	actual, inflight := p.inflight.LoadOrStore(cacheKey, call)
 	if inflight {
+		shared := actual.(*inflightDownload)
 		p.mu.Lock()
 		p.stats.ActiveDownloads++
 		p.mu.Unlock()
@@ -243,9 +251,33 @@ func (p *MediaPipeline) DownloadWithOptions(ctx context.Context, req *MediaDownl
 			p.stats.ActiveDownloads--
 			p.mu.Unlock()
 		}()
-	} else {
-		defer p.inflight.Delete(cacheKey)
+
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-shared.done:
+		}
+
+		if shared.err != nil {
+			return nil, shared.err
+		}
+
+		for _, hook := range hooks {
+			_ = hook.OnAfterDownload(ctx, shared.media, false)
+		}
+
+		p.mu.Lock()
+		p.stats.DownloadsTotal++
+		p.stats.BytesDownloaded += shared.media.Size
+		p.stats.LastDownloadTime = time.Now()
+		p.mu.Unlock()
+
+		return shared.media, nil
 	}
+	defer func() {
+		close(call.done)
+		p.inflight.Delete(cacheKey)
+	}()
 
 	var media *Media
 	var lastErr error
@@ -270,16 +302,19 @@ func (p *MediaPipeline) DownloadWithOptions(ctx context.Context, req *MediaDownl
 	}
 
 	if lastErr != nil {
+		call.err = fmt.Errorf("media-pipeline: download failed after %d attempts: %w", retryCount+1, lastErr)
 		p.mu.Lock()
 		p.stats.DownloadsFailed++
 		p.stats.DownloadsTotal++
 		p.mu.Unlock()
-		return nil, fmt.Errorf("media-pipeline: download failed after %d attempts: %w", retryCount+1, lastErr)
+		return nil, call.err
 	}
 
 	if cache != nil {
 		cache.Set(cacheKey, media)
 	}
+
+	call.media = media
 
 	for _, hook := range hooks {
 		_ = hook.OnAfterDownload(ctx, media, false)

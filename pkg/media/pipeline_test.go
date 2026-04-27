@@ -1075,6 +1075,57 @@ func TestMediaPipeline_ConcurrentDownloads(t *testing.T) {
 	}
 }
 
+func TestMediaPipeline_ConcurrentSameRequestSingleFlight(t *testing.T) {
+	var callCount int32
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&callCount, 1)
+		time.Sleep(50 * time.Millisecond)
+		w.Header().Set("Content-Type", "application/octet-stream")
+		_, _ = w.Write([]byte("shared-response"))
+	}))
+	defer server.Close()
+
+	cfg := DefaultMediaPipelineConfig()
+	cfg.UseCache = false
+
+	pipeline := NewMediaPipeline(cfg)
+
+	const workers = 8
+	results := make(chan error, workers)
+	var wg sync.WaitGroup
+
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			media, err := pipeline.DownloadWithOptions(context.Background(), &MediaDownloadRequest{URL: server.URL})
+			if err != nil {
+				results <- err
+				return
+			}
+			if string(media.Data) != "shared-response" {
+				results <- fmt.Errorf("unexpected payload %q", string(media.Data))
+				return
+			}
+			results <- nil
+		}()
+	}
+
+	wg.Wait()
+	close(results)
+
+	for err := range results {
+		if err != nil {
+			t.Fatalf("concurrent same-request download failed: %v", err)
+		}
+	}
+
+	if atomic.LoadInt32(&callCount) != 1 {
+		t.Fatalf("expected a single upstream HTTP call for identical concurrent requests, got %d", callCount)
+	}
+}
+
 func TestMediaPipeline_ContextCancellation(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		time.Sleep(500 * time.Millisecond)
