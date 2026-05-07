@@ -265,6 +265,98 @@ func TestBuildSystemPromptInjectsMainSystemPrompt(t *testing.T) {
 	}
 }
 
+func TestBuildSystemPromptUsesOpenClawStyleSkillInstructions(t *testing.T) {
+	root := t.TempDir()
+	skillDir := filepath.Join(root, "weather")
+	if err := os.MkdirAll(skillDir, 0o755); err != nil {
+		t.Fatalf("mkdir skill dir: %v", err)
+	}
+	skillLocation := filepath.Join(skillDir, "SKILL.md")
+	if err := os.WriteFile(skillLocation, []byte("# Weather\n\nUse weather APIs carefully."), 0o644); err != nil {
+		t.Fatalf("write SKILL.md: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(skillDir, "skill.json"), []byte(`{
+  "name": "weather",
+  "description": "Query weather forecasts and conditions.",
+  "version": "1.0.0",
+  "prompts": {"system": "DO NOT INLINE THIS PROMPT"}
+}`), 0o644); err != nil {
+		t.Fatalf("write skill.json: %v", err)
+	}
+
+	manager := skills.NewSkillsManager(root)
+	if err := manager.Load(); err != nil {
+		t.Fatalf("load skills: %v", err)
+	}
+
+	ag := New(Config{
+		Name:        "assistant",
+		Description: "General helper",
+		Skills:      manager,
+		Tools:       tools.NewRegistry(),
+	})
+
+	systemPrompt, err := ag.buildSystemPrompt()
+	if err != nil {
+		t.Fatalf("buildSystemPrompt: %v", err)
+	}
+	for _, want := range []string{
+		"## Skills (mandatory)",
+		"<available_skills>",
+		"<name>weather</name>",
+		"<description>Query weather forecasts and conditions.</description>",
+		"<location>" + skillLocation + "</location>",
+		"never read more than one skill up front",
+	} {
+		if !strings.Contains(systemPrompt, want) {
+			t.Fatalf("expected skill prompt to contain %q, got %q", want, systemPrompt)
+		}
+	}
+	if strings.Contains(systemPrompt, "## Active Skills") || strings.Contains(systemPrompt, "DO NOT INLINE THIS PROMPT") {
+		t.Fatalf("expected lazy skill loading prompt without inline system prompt, got %q", systemPrompt)
+	}
+}
+
+func TestSelectToolInfosExposesReadForLazySkillInstructions(t *testing.T) {
+	root := t.TempDir()
+	skillDir := filepath.Join(root, "weather")
+	if err := os.MkdirAll(skillDir, 0o755); err != nil {
+		t.Fatalf("mkdir skill dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(skillDir, "SKILL.md"), []byte("# Weather"), 0o644); err != nil {
+		t.Fatalf("write SKILL.md: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(skillDir, "skill.json"), []byte(`{
+  "name": "weather",
+  "description": "Query weather forecasts and conditions.",
+  "version": "1.0.0",
+  "prompts": {"system": "Use weather."}
+}`), 0o644); err != nil {
+		t.Fatalf("write skill.json: %v", err)
+	}
+
+	manager := skills.NewSkillsManager(root)
+	if err := manager.Load(); err != nil {
+		t.Fatalf("load skills: %v", err)
+	}
+	registry := tools.NewRegistry()
+	tools.RegisterOpenClawCompatTools(registry, tools.BuiltinOptions{})
+	registry.RegisterTool("read_file", "Read a file", map[string]any{}, nil)
+	ag := New(Config{Skills: manager, Tools: registry})
+
+	selected := ag.selectToolInfos("hello")
+	names := make(map[string]bool, len(selected))
+	for _, tool := range selected {
+		names[tool.Name] = true
+	}
+	if !names["read"] || !names["read_file"] {
+		t.Fatalf("expected read tools for lazy skill loading, got %#v", selected)
+	}
+	if names["write"] || names["run_command"] {
+		t.Fatalf("expected only read-oriented skill loading tools, got %#v", selected)
+	}
+}
+
 func TestBuildSystemPromptHandlesNilDependencies(t *testing.T) {
 	ag := New(Config{
 		Name:        "assistant",

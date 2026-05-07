@@ -55,7 +55,7 @@ AnyClaw 现在的主流程可以概括成下面这条链路：
 | 1. 客户端与展示层 | Web 控制台、桌面壳、终端 CLI 展示 | `ui/`, `cmd/anyclaw/`, `cmd/anyclaw-desktop/`, `cmd/anyclaw-desktop/frontend/` |
 | 2. 运行时装配层 | 配置加载、启动编排、工作区初始化、环境自检 | `pkg/runtime`, `pkg/runtime/bootstrap`, `pkg/config`, `pkg/workspace`, `pkg/input/cli/setup` |
 | 3. Agent 内核 | 对话执行、Prompt、上下文管理、记忆、模型调用 | `pkg/capability/agents`, `pkg/runtime/context`, `pkg/state/memory`, `pkg/embedding`, `pkg/capability/models` |
-| 4. 工具与执行平台 | 文件/Shell/浏览器/桌面操作、CLI Hub、沙箱、多模态工具 | `pkg/capability/tools`, `pkg/clihub`, `pkg/cdp`, `pkg/vision`, `pkg/media`, `pkg/canvas`, `pkg/qmd`, `pkg/isolation`, `pkg/runtime/execution/verification` |
+| 4. 工具与执行平台 | 文件/Shell/浏览器/桌面操作、CLI Hub、沙箱、多模态工具 | `pkg/capability/tools`, `pkg/clihub`, `pkg/vision`, `pkg/media`, `pkg/canvas`, `pkg/qmd`, `pkg/isolation`, `pkg/runtime/execution/verification` |
 | 5. 编排与任务流 | 多 Agent 编排、任务执行、工作流、计划、定时任务 | `pkg/runtime/orchestrator`, `pkg/runtime/taskrunner`, `pkg/capability/workflows`, `pkg/runtime/execution/schedule`, `pkg/route`, `pkg/runtime/pool.go` |
 | 6. 接入网关与会话层 | HTTP/WS API、OpenAI 兼容 API、会话状态、渠道接入、事件流 | `pkg/gateway`, `pkg/gateway/transport`, `pkg/gateway/ingress`, `pkg/gateway/intake`, `pkg/gateway/events`, `pkg/runtime/channelbridge`, `pkg/runtime/sessionbridge`, `pkg/input/channels`, `pkg/gateway/resources/discovery` |
 | 7. 扩展生态层 | Skills、Plugins、MCP、Agent Store、市场能力 | `pkg/capability/skills`, `pkg/extensions/plugin`, `pkg/extensions/mcp`, `pkg/extensions/adapters`, `pkg/capability/catalogs`, `skills/`, `extensions/` |
@@ -122,7 +122,6 @@ AnyClaw 现在的主流程可以概括成下面这条链路：
 
 - `pkg/capability/tools`: 内置工具注册表，包含文件、命令、浏览器、桌面、审批、策略等
 - `pkg/clihub` / `pkg/extensions/adapters/cli`: CLI-Anything 与本地 CLI 能力接入
-- `pkg/cdp`: 浏览器自动化
 - `pkg/vision` / `pkg/media`: 图像、视频、音频处理与理解
 - `pkg/canvas`: UI/画布输出
 - `pkg/qmd`: 轻量结构化数据服务

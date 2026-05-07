@@ -2,23 +2,42 @@
   "llm": {
     "provider": "openai",
     "model": "gpt-4o-mini",
-    "api_key": "YOUR_API_KEY",
+    "api_key": "",
     "base_url": "https://api.openai.com/v1",
     "max_tokens": 4096,
-    "temperature": 0.7
+    "temperature": 0.7,
+    "proxy": "",
+    "extra": {},
+    "routing": {
+      "enabled": false,
+      "reasoning_keywords": [
+        "plan",
+        "complex",
+        "reasoning",
+        "analysis",
+        "debug",
+        "script",
+        "code",
+        "refactor",
+        "architecture",
+        "design"
+      ],
+      "reasoning_provider": "",
+      "reasoning_model": "",
+      "fast_provider": "",
+      "fast_model": ""
+    }
   },
   "agent": {
     "name": "AnyClaw",
-    "description": "Your AI assistant with file-based memory",
+    "description": "Your AI assistant with Codex-style runtime memory",
     "work_dir": ".anyclaw",
     "working_dir": "workflows/default",
-    "permission_level": "limited",
-    "require_confirmation_for_dangerous": true,
     "profiles": [],
     "active_profile": "",
     "lang": "zh-CN",
-    "work_focus": "通用",
-    "behavior_style": "简洁",
+    "work_focus": "general",
+    "behavior_style": "concise",
     "constraints": ""
   },
   "providers": [
@@ -28,7 +47,7 @@
       "type": "openai",
       "provider": "openai",
       "base_url": "https://api.openai.com/v1",
-      "api_key": "YOUR_API_KEY",
+      "api_key": "",
       "default_model": "gpt-4o-mini",
       "enabled": true
     }
@@ -40,10 +59,10 @@
     "exclude": []
   },
   "memory": {
-    "dir": "memory",
+    "dir": "",
     "max_history": 100,
     "format": "markdown",
-    "auto_save": true
+    "auto_save": false
   },
   "gateway": {
     "host": "127.0.0.1",
@@ -70,14 +89,18 @@
       "enabled": false,
       "bot_token": "",
       "chat_id": "",
-      "poll_every_seconds": 3
+      "poll_every_seconds": 3,
+      "stream_reply": false,
+      "stream_interval_ms": 0
     },
     "slack": {
       "enabled": false,
       "bot_token": "",
       "app_token": "",
       "default_channel": "",
-      "poll_every_seconds": 3
+      "poll_every_seconds": 3,
+      "stream_reply": false,
+      "stream_interval_ms": 0
     },
     "discord": {
       "enabled": false,
@@ -87,7 +110,9 @@
       "api_base_url": "https://discord.com/api/v10",
       "guild_id": "",
       "public_key": "",
-      "use_gateway_ws": true
+      "use_gateway_ws": true,
+      "stream_reply": false,
+      "stream_interval_ms": 0
     },
     "whatsapp": {
       "enabled": false,
@@ -162,37 +187,29 @@
     "users": [],
     "roles": [],
     "audit_log": ".anyclaw/audit/audit.jsonl",
-    "dangerous_command_patterns": [
-      "rm -rf",
-      "del /f",
-      "format ",
-      "mkfs",
-      "shutdown",
-      "reboot",
-      "poweroff",
-      "chmod 777",
-      "takeown",
-      "icacls",
-      "git reset --hard"
-    ],
     "command_timeout_seconds": 30,
-    "desktop_approval_scope": "capability",
     "risk_acknowledged": false,
     "pairing_enabled": false,
     "pairing_ttl_hours": 72,
     "pairing_max_devices": 0
   },
+  "orchestrator": {
+    "enabled": true,
+    "max_concurrent_agents": 4,
+    "max_retries": 2,
+    "timeout_seconds": 300,
+    "enable_decomposition": true,
+    "sub_agents": []
+  },
   "speech": {
-    "enabled": false,
-    "voice_wake": {
+    "stt": {
       "enabled": false,
+      "auto_stt": false,
       "provider": "",
       "model": "",
-      "keyword": "",
-      "device": "",
-      "sensitivity": 0,
-      "vad_threshold": 0,
-      "silence_ms": 0,
+      "api_key": "",
+      "base_url": "",
+      "default_lang": "",
       "max_duration_seconds": 0,
       "min_confidence": 0,
       "timeout_seconds": 0,
@@ -204,8 +221,10 @@
     },
     "tts": {
       "enabled": false,
+      "auto_tts": false,
       "provider": "",
-      "model": "",
+      "api_key": "",
+      "base_url": "",
       "voice": "",
       "speed": 0,
       "format": "",

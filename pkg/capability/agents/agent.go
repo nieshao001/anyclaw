@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
 	"regexp"
 	"sort"
 	"strings"
@@ -445,7 +447,10 @@ func (a *Agent) buildSystemPromptForToolInfos(toolList []tools.ToolInfo) (string
 		}
 	}
 
-	skillPrompts := a.selectedSkillPrompts(toolList)
+	var availableSkills []prompt.AvailableSkill
+	if a.skills != nil {
+		availableSkills = a.availableSkillsForPrompt()
+	}
 
 	var cliHubInfo *prompt.CLIHubInfo
 	if shouldIncludeCLIHubPromptInfo(toolList) {
@@ -498,20 +503,80 @@ func (a *Agent) buildSystemPromptForToolInfos(toolList []tools.ToolInfo) (string
 
 	description := strings.TrimSpace(strings.Join(compactStrings(a.config.Description, a.config.Personality), "\n\n"))
 	data := prompt.PromptData{
-		Name:           a.config.Name,
-		Description:    description,
-		SystemPrompt:   strings.TrimSpace(a.config.SystemPrompt),
-		Personality:    strings.TrimSpace(a.config.Personality),
-		WorkingDir:     a.workingDir,
-		SkillPrompts:   skillPrompts,
-		Tools:          toolInfos,
-		CLIHub:         cliHubInfo,
-		ClawBridge:     bridgeInfo,
-		WorkspaceFiles: workspaceFiles,
-		History:        a.history,
+		Name:            a.config.Name,
+		Description:     description,
+		SystemPrompt:    strings.TrimSpace(a.config.SystemPrompt),
+		Personality:     strings.TrimSpace(a.config.Personality),
+		WorkingDir:      a.workingDir,
+		AvailableSkills: availableSkills,
+		Tools:           toolInfos,
+		CLIHub:          cliHubInfo,
+		ClawBridge:      bridgeInfo,
+		WorkspaceFiles:  workspaceFiles,
+		History:         a.history,
 	}
 
 	return prompt.BuildSystemPrompt(a.config.Name, description, data)
+}
+
+func (a *Agent) availableSkillsForPrompt() []prompt.AvailableSkill {
+	if a.skills == nil {
+		return nil
+	}
+	list := append([]*skills.Skill(nil), a.skills.List()...)
+	sort.Slice(list, func(i, j int) bool {
+		left := ""
+		if list[i] != nil {
+			left = strings.ToLower(strings.TrimSpace(list[i].Name))
+		}
+		right := ""
+		if list[j] != nil {
+			right = strings.ToLower(strings.TrimSpace(list[j].Name))
+		}
+		return left < right
+	})
+
+	items := make([]prompt.AvailableSkill, 0, len(list))
+	for _, skill := range list {
+		if skill == nil {
+			continue
+		}
+		location := readableSkillLocation(skill)
+		if location == "" {
+			continue
+		}
+		items = append(items, prompt.AvailableSkill{
+			Name:        skill.Name,
+			Description: skill.Description,
+			Location:    location,
+		})
+	}
+	return items
+}
+
+func readableSkillLocation(skill *skills.Skill) string {
+	if skill == nil || skill.Metadata == nil {
+		return ""
+	}
+	skillPath := strings.TrimSpace(skill.Metadata["path"])
+	if skillPath == "" || strings.HasPrefix(strings.ToLower(skillPath), "builtin://") {
+		return ""
+	}
+	if !filepath.IsAbs(skillPath) {
+		if absPath, err := filepath.Abs(skillPath); err == nil {
+			skillPath = absPath
+		}
+	}
+	if info, err := os.Stat(skillPath); err == nil && !info.IsDir() {
+		return filepath.Clean(skillPath)
+	}
+	for _, name := range []string{"SKILL.md", "skill.json"} {
+		candidate := filepath.Join(skillPath, name)
+		if info, err := os.Stat(candidate); err == nil && !info.IsDir() {
+			return filepath.Clean(candidate)
+		}
+	}
+	return ""
 }
 
 func (a *Agent) selectToolInfos(userInput string) []tools.ToolInfo {
@@ -526,12 +591,18 @@ func (a *Agent) selectToolInfos(userInput string) []tools.ToolInfo {
 
 	query := normalizeToolSelectionText(userInput)
 	cliHubIntent := a.shouldExposeCLIHubIntentTools(userInput)
-	if !shouldExposeToolsForInput(query, allTools) && !cliHubIntent {
+	toolExposure := shouldExposeToolsForInput(query, allTools)
+	skillInstructions := a.hasReadableSkillInstructions()
+	if !toolExposure && !cliHubIntent && !skillInstructions {
 		return nil
 	}
 
 	intent := classifyCodexToolIntent(query, userInput, cliHubIntent)
 	coreExact := selectedCoreToolNamesForIntent(query, userInput, intent)
+	if skillInstructions {
+		coreExact["read"] = struct{}{}
+		coreExact["read_file"] = struct{}{}
+	}
 	prefixes := selectedToolPrefixesForIntent(query, allTools, intent)
 	appPrefixes := matchedToolPrefixes(query, allTools)
 	prefixes = append(prefixes, appPrefixes...)
@@ -554,6 +625,18 @@ func (a *Agent) selectToolInfos(userInput string) []tools.ToolInfo {
 	}
 
 	return limitSelectedToolInfos(selected, codexMaxSelectedTools)
+}
+
+func (a *Agent) hasReadableSkillInstructions() bool {
+	if a.skills == nil {
+		return false
+	}
+	for _, skill := range a.skills.List() {
+		if readableSkillLocation(skill) != "" {
+			return true
+		}
+	}
+	return false
 }
 
 func selectedCoreToolNames(query string, rawInput string, cliHubIntent bool) map[string]struct{} {

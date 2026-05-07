@@ -92,9 +92,6 @@ func (s *Server) registerSessionTaskRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/v2/tasks", s.wrap("/v2/tasks", requirePermission("tasks.write", s.handleV2Tasks)))
 	mux.HandleFunc("/v2/tasks/", s.wrap("/v2/tasks/", requirePermission("tasks.read", s.handleV2TaskByID)))
 	mux.HandleFunc("/v2/agents", s.wrap("/v2/agents", requirePermission("tasks.read", s.handleV2Agents)))
-	mux.HandleFunc("/v2/chat", s.wrap("/v2/chat", requirePermission("tasks.write", s.handleV2Chat)))
-	mux.HandleFunc("/v2/chat/sessions", s.wrap("/v2/chat/sessions", requirePermission("tasks.read", s.handleV2ChatSessions)))
-	mux.HandleFunc("/v2/chat/sessions/", s.wrap("/v2/chat/sessions/", requirePermission("tasks.read", s.handleV2ChatSessionByID)))
 	mux.HandleFunc("/v2/store", s.wrap("/v2/store", requirePermission("tasks.read", s.handleV2Store)))
 	mux.HandleFunc("/v2/store/", s.wrap("/v2/store/", requirePermission("tasks.read", s.handleV2StoreByID)))
 }
