@@ -22,6 +22,7 @@ import (
 
 type stubAgentLLM struct {
 	responses []*llm.Response
+	errs      []error
 	index     int
 	messages  [][]llm.Message
 	toolDefs  [][]llm.ToolDefinition
@@ -60,6 +61,11 @@ func (s *streamingAgentLLM) StreamChatResponse(ctx context.Context, messages []l
 func (s *stubAgentLLM) Chat(ctx context.Context, messages []llm.Message, toolDefs []llm.ToolDefinition) (*llm.Response, error) {
 	s.messages = append(s.messages, append([]llm.Message(nil), messages...))
 	s.toolDefs = append(s.toolDefs, append([]llm.ToolDefinition(nil), toolDefs...))
+	if s.index < len(s.errs) && s.errs[s.index] != nil {
+		err := s.errs[s.index]
+		s.index++
+		return nil, err
+	}
 	if s.index >= len(s.responses) {
 		return &llm.Response{Content: "done"}, nil
 	}
@@ -197,6 +203,9 @@ func TestBuildSystemPromptIncludesPersonalityAndAnyClawCore(t *testing.T) {
 	if !strings.Contains(systemPrompt, "execution-focused local app agent") {
 		t.Fatalf("expected personality to be injected into the system prompt, got %q", systemPrompt)
 	}
+	if !strings.Contains(systemPrompt, "Codex-style coding and local execution agent") {
+		t.Fatalf("expected Codex-style header in system prompt, got %q", systemPrompt)
+	}
 	if !strings.Contains(systemPrompt, "## Operating Mode") {
 		t.Fatalf("expected operating mode section, got %q", systemPrompt)
 	}
@@ -212,8 +221,14 @@ func TestBuildSystemPromptIncludesPersonalityAndAnyClawCore(t *testing.T) {
 	if !strings.Contains(systemPrompt, "Work in loops: inspect the current state") {
 		t.Fatalf("expected iterative execution guidance in system prompt, got %q", systemPrompt)
 	}
+	if !strings.Contains(systemPrompt, "read the codebase first") || !strings.Contains(systemPrompt, "Do not revert or overwrite user changes") {
+		t.Fatalf("expected Codex-style coding workspace guidance, got %q", systemPrompt)
+	}
 	if !strings.Contains(systemPrompt, "verify the requested deliverable with observable evidence") {
 		t.Fatalf("expected verification guidance in system prompt, got %q", systemPrompt)
+	}
+	if !strings.Contains(systemPrompt, "## Final Response Style") || !strings.Contains(systemPrompt, "已处理") || !strings.Contains(systemPrompt, "已验证") || !strings.Contains(systemPrompt, "未确认/阻塞") {
+		t.Fatalf("expected Codex-style final response guidance, got %q", systemPrompt)
 	}
 }
 
@@ -269,7 +284,7 @@ func TestBuildSystemPromptHandlesNilDependencies(t *testing.T) {
 	}
 }
 
-func TestBuildSystemPromptLimitsInjectedMemory(t *testing.T) {
+func TestBuildSystemPromptDoesNotInjectMemoryByDefault(t *testing.T) {
 	mem := memory.NewFileMemory(t.TempDir())
 	if err := mem.Init(); err != nil {
 		t.Fatalf("memory init: %v", err)
@@ -307,14 +322,14 @@ func TestBuildSystemPromptLimitsInjectedMemory(t *testing.T) {
 	if len(systemPrompt) > 12000 {
 		t.Fatalf("expected bounded prompt length, got %d characters", len(systemPrompt))
 	}
-	if !strings.Contains(systemPrompt, "stable-fact") {
-		t.Fatalf("expected stable memory to be retained, got %q", systemPrompt)
+	if strings.Contains(systemPrompt, "stable-fact") {
+		t.Fatalf("expected durable memory to stay out of default prompt injection, got %q", systemPrompt)
 	}
 	if strings.Contains(systemPrompt, "conversation-11") || strings.Contains(systemPrompt, "conversation-00") {
 		t.Fatalf("expected conversation memories to stay out of prompt injection, got %q", systemPrompt)
 	}
-	if !strings.Contains(systemPrompt, "Prompt memory limited.") {
-		t.Fatalf("expected truncated memory notice, got %q", systemPrompt)
+	if strings.Contains(systemPrompt, "Prompt memory limited.") || strings.Contains(systemPrompt, "## Memory\n") {
+		t.Fatalf("expected old prompt memory injection to stay removed, got %q", systemPrompt)
 	}
 }
 
@@ -359,8 +374,31 @@ func TestSelectToolInfosHandlesChineseDesktopRequest(t *testing.T) {
 		names = append(names, tool.Name)
 	}
 	got := strings.Join(names, ",")
-	if !strings.Contains(got, "computer_observe") || !strings.Contains(got, "computer_action") || !strings.Contains(got, "desktop_open") || !strings.Contains(got, "desktop_list_windows") || !strings.Contains(got, "skill_app-controller") {
-		t.Fatalf("expected desktop and skill tools for Chinese open-app request, got %q", got)
+	if !strings.Contains(got, "computer_observe") || !strings.Contains(got, "computer_action") || !strings.Contains(got, "desktop_open") || !strings.Contains(got, "desktop_list_windows") {
+		t.Fatalf("expected desktop tools for Chinese open-app request, got %q", got)
+	}
+	if strings.Contains(got, "skill_app-controller") {
+		t.Fatalf("expected skill tools to stay hidden unless explicitly requested, got %q", got)
+	}
+}
+
+func TestSelectToolInfosTreatsGeneratedPageOpenAsDesktopRequest(t *testing.T) {
+	registry := tools.NewRegistry()
+	registry.RegisterTool("read_file", "Read a file", map[string]any{}, nil)
+	registry.RegisterTool("browser_navigate", "Navigate browser", map[string]any{}, nil)
+	registry.RegisterTool("desktop_open", "Open a desktop target", map[string]any{}, nil)
+	registry.RegisterTool("desktop_list_windows", "List desktop windows", map[string]any{}, nil)
+
+	ag := New(Config{Tools: registry})
+
+	actionable := ag.selectToolInfos("帮我打开你生成的页面")
+	names := make([]string, 0, len(actionable))
+	for _, tool := range actionable {
+		names = append(names, tool.Name)
+	}
+	got := strings.Join(names, ",")
+	if !strings.Contains(got, "desktop_open") || !strings.Contains(got, "desktop_list_windows") {
+		t.Fatalf("expected desktop tools for generated page open request, got %q", got)
 	}
 }
 
@@ -440,6 +478,35 @@ func TestSelectToolInfosOnlyExposesRelevantCoreTools(t *testing.T) {
 	for _, name := range []string{"read", "write", "edit", "apply_patch", "exec", "process", "image", "image_analyze"} {
 		if names[name] {
 			t.Fatalf("expected unrelated core tool %q to stay hidden, got %#v", name, names)
+		}
+	}
+}
+
+func TestSelectToolInfosUsesCodexCodeToolsForChineseAppBuild(t *testing.T) {
+	registry := tools.NewRegistry()
+	for _, name := range []string{
+		"read_file", "write_file", "list_directory", "search_files", "run_command",
+		"desktop_open", "desktop_list_windows", "browser_navigate", "computer_observe", "computer_action", "skill_app-controller",
+	} {
+		registry.RegisterTool(name, "tool "+name, map[string]any{}, nil)
+	}
+
+	ag := New(Config{Tools: registry})
+
+	selected := ag.selectToolInfos("帮我生成一个贪吃蛇小游戏")
+	names := make(map[string]bool, len(selected))
+	for _, tool := range selected {
+		names[tool.Name] = true
+	}
+
+	for _, name := range []string{"read_file", "write_file", "list_directory", "search_files", "run_command"} {
+		if !names[name] {
+			t.Fatalf("expected Codex code tool %q for app build request, got %#v", name, names)
+		}
+	}
+	for _, name := range []string{"desktop_open", "desktop_list_windows", "browser_navigate", "computer_observe", "computer_action", "skill_app-controller"} {
+		if names[name] {
+			t.Fatalf("expected unrelated tool %q to stay hidden for app build request, got %#v", name, names)
 		}
 	}
 }
@@ -565,8 +632,11 @@ func TestBuildSystemPromptInjectsWorkspaceBootstrapFiles(t *testing.T) {
 	if !strings.Contains(systemPrompt, "## Project Context") {
 		t.Fatalf("expected project context section in system prompt, got %q", systemPrompt)
 	}
-	if !strings.Contains(systemPrompt, "### AGENTS.md") || !strings.Contains(systemPrompt, "### MEMORY.md") {
-		t.Fatalf("expected bootstrap files to be injected, got %q", systemPrompt)
+	if !strings.Contains(systemPrompt, "### AGENTS.md") {
+		t.Fatalf("expected AGENTS.md to be injected, got %q", systemPrompt)
+	}
+	if strings.Contains(systemPrompt, "### MEMORY.md") {
+		t.Fatalf("expected old MEMORY.md prompt injection to stay removed, got %q", systemPrompt)
 	}
 }
 
@@ -664,7 +734,7 @@ func TestBuildSystemPromptInjectsClawBridgeContext(t *testing.T) {
 		t.Fatalf("memory init: %v", err)
 	}
 	registry := tools.NewRegistry()
-	registry.RegisterTool("run_command", "Run a shell command", map[string]any{}, nil)
+	registry.RegisterTool("claw_bridge_context", "Read claw bridge context", map[string]any{}, nil)
 
 	workingDir := filepath.Join(t.TempDir(), "workspace")
 	if err := os.MkdirAll(workingDir, 0o755); err != nil {
@@ -902,13 +972,496 @@ func TestAgentRunAddsObservationAndVerificationPromptAfterToolResults(t *testing
 	}
 	foundFollowup := false
 	for _, msg := range llmStub.messages[1] {
-		if msg.Role == "user" && strings.Contains(msg.Content, "Tool results above are evidence about the current world state") && strings.Contains(msg.Content, "Before claiming completion, verify the outcome") {
+		if msg.Role == "user" && strings.Contains(msg.Content, "Structured tool observations above are evidence about the current world state") && strings.Contains(msg.Content, "Before claiming completion, verify the outcome") {
 			foundFollowup = true
 			break
 		}
 	}
 	if !foundFollowup {
 		t.Fatalf("expected observation/verification follow-up prompt, got %#v", llmStub.messages[1])
+	}
+}
+
+func TestAgentRunCompletesWithToolResultWhenFinalLLMTimesOut(t *testing.T) {
+	mem := memory.NewFileMemory(t.TempDir())
+	if err := mem.Init(); err != nil {
+		t.Fatalf("memory init: %v", err)
+	}
+	registry := tools.NewRegistry()
+	registry.RegisterTool("desktop_open", "Open desktop target", map[string]any{}, func(ctx context.Context, input map[string]any) (string, error) {
+		return "opened file", nil
+	})
+
+	llmStub := &stubAgentLLM{
+		responses: []*llm.Response{
+			{
+				ToolCalls: []llm.ToolCall{
+					{
+						ID:   "tool-open",
+						Type: "function",
+						Function: llm.FunctionCall{
+							Name:      "desktop_open",
+							Arguments: `{"target":"snake_game.html","kind":"file"}`,
+						},
+					},
+				},
+			},
+		},
+		errs: []error{nil, context.DeadlineExceeded},
+	}
+
+	ag := New(Config{
+		Name:        "assistant",
+		Description: "General helper",
+		LLM:         llmStub,
+		Memory:      mem,
+		Skills:      skills.NewSkillsManager(""),
+		Tools:       registry,
+	})
+
+	result, err := ag.Run(context.Background(), "帮我打开snake_game.html")
+	if err != nil {
+		t.Fatalf("Run should complete from successful tool result: %v", err)
+	}
+	for _, want := range []string{"已处理", "已打开文件 snake_game.html", "模型生成补充说明失败"} {
+		if !strings.Contains(result, want) {
+			t.Fatalf("expected fallback result to contain %q, got %q", want, result)
+		}
+	}
+	if len(llmStub.messages) != 2 {
+		t.Fatalf("expected initial tool turn plus failed final turn, got %d", len(llmStub.messages))
+	}
+	activities := ag.GetLastToolActivities()
+	if len(activities) != 1 || activities[0].ToolName != "desktop_open" || activities[0].Error != "" {
+		t.Fatalf("expected successful desktop_open activity, got %#v", activities)
+	}
+}
+
+func TestAgentRunDoesNotCompleteFromReadOnlyToolWhenFinalLLMTimesOut(t *testing.T) {
+	mem := memory.NewFileMemory(t.TempDir())
+	if err := mem.Init(); err != nil {
+		t.Fatalf("memory init: %v", err)
+	}
+	registry := tools.NewRegistry()
+	registry.RegisterTool("read_file", "Read a file", map[string]any{}, func(ctx context.Context, input map[string]any) (string, error) {
+		return "<html></html>", nil
+	})
+
+	llmStub := &stubAgentLLM{
+		responses: []*llm.Response{
+			{
+				ToolCalls: []llm.ToolCall{
+					{
+						ID:   "tool-read",
+						Type: "function",
+						Function: llm.FunctionCall{
+							Name:      "read_file",
+							Arguments: `{"path":"anyclaw_webpage.html"}`,
+						},
+					},
+				},
+			},
+		},
+		errs: []error{nil, context.DeadlineExceeded},
+	}
+
+	ag := New(Config{
+		Name:        "assistant",
+		Description: "General helper",
+		LLM:         llmStub,
+		Memory:      mem,
+		Skills:      skills.NewSkillsManager(""),
+		Tools:       registry,
+	})
+
+	result, err := ag.Run(context.Background(), "帮我打开你生成的页面")
+	if err == nil {
+		t.Fatalf("expected read-only tool fallback to keep the task failed, got result %q", result)
+	}
+	if strings.Contains(result, "已处理") || strings.Contains(result, "未确认/阻塞：\n- 无") {
+		t.Fatalf("did not expect completion-style response from read-only fallback, got %q", result)
+	}
+	activities := ag.GetLastToolActivities()
+	if len(activities) != 1 || activities[0].ToolName != "read_file" || activities[0].Error != "" {
+		t.Fatalf("expected recorded read_file activity, got %#v", activities)
+	}
+}
+
+func TestAgentRunDoesNotCompleteFromRunCommandWhenFinalLLMTimesOut(t *testing.T) {
+	mem := memory.NewFileMemory(t.TempDir())
+	if err := mem.Init(); err != nil {
+		t.Fatalf("memory init: %v", err)
+	}
+	registry := tools.NewRegistry()
+	registry.RegisterTool("run_command", "Run a command", map[string]any{}, func(ctx context.Context, input map[string]any) (string, error) {
+		return "File does not exist", nil
+	})
+
+	llmStub := &stubAgentLLM{
+		responses: []*llm.Response{
+			{
+				ToolCalls: []llm.ToolCall{
+					{
+						ID:   "tool-run",
+						Type: "function",
+						Function: llm.FunctionCall{
+							Name:      "run_command",
+							Arguments: `{"command":"start missing.html"}`,
+						},
+					},
+				},
+			},
+		},
+		errs: []error{nil, context.DeadlineExceeded},
+	}
+
+	ag := New(Config{
+		Name:        "assistant",
+		Description: "General helper",
+		LLM:         llmStub,
+		Memory:      mem,
+		Skills:      skills.NewSkillsManager(""),
+		Tools:       registry,
+	})
+
+	result, err := ag.Run(context.Background(), "帮我打开你生成的页面")
+	if err == nil {
+		t.Fatalf("expected run_command fallback to keep the task failed, got result %q", result)
+	}
+	if strings.Contains(result, "已处理") || strings.Contains(result, "未确认/阻塞：\n- 无") {
+		t.Fatalf("did not expect completion-style response from run_command fallback, got %q", result)
+	}
+}
+
+func TestAgentRunSummarizesPageOpenToolFallback(t *testing.T) {
+	mem := memory.NewFileMemory(t.TempDir())
+	if err := mem.Init(); err != nil {
+		t.Fatalf("memory init: %v", err)
+	}
+	registry := tools.NewRegistry()
+	registry.RegisterTool("run_command", "Run a command", map[string]any{}, func(ctx context.Context, input map[string]any) (string, error) {
+		switch strings.TrimSpace(fmt.Sprint(input["command"])) {
+		case "Test-Path 'D:\\anyclaw\\anyclaw\\workflows\\default\\anyclaw_webpage.html'":
+			return "True", nil
+		case "Invoke-Item 'D:\\anyclaw\\anyclaw\\workflows\\default\\anyclaw_webpage.html'":
+			return "", nil
+		case "Start-Process 'msedge.exe' -ArgumentList 'D:\\anyclaw\\anyclaw\\workflows\\default\\anyclaw_webpage.html'":
+			return "", nil
+		case "Get-Process msedge":
+			return "Handles  NPM(K)    PM(K)      WS(K)     CPU(s)     Id  SI ProcessName\n  1000      45   120000     180000       1.23  12345   1 msedge", nil
+		default:
+			return "", fmt.Errorf("unexpected command")
+		}
+	})
+	registry.RegisterTool("computer_observe", "Observe computer", map[string]any{}, func(ctx context.Context, input map[string]any) (string, error) {
+		return `{"protocol":"anyclaw.computer.codex.v1","environment":"desktop","screenshot_path":"D:\\observe.png","windows":[{"title":"anyclaw_webpage.html - Microsoft Edge","process_name":"msedge"}]}`, nil
+	})
+
+	llmStub := &stubAgentLLM{
+		responses: []*llm.Response{
+			{ToolCalls: []llm.ToolCall{
+				{ID: "tool-test", Type: "function", Function: llm.FunctionCall{Name: "run_command", Arguments: `{"command":"Test-Path 'D:\\anyclaw\\anyclaw\\workflows\\default\\anyclaw_webpage.html'"}`}},
+				{ID: "tool-open", Type: "function", Function: llm.FunctionCall{Name: "run_command", Arguments: `{"command":"Invoke-Item 'D:\\anyclaw\\anyclaw\\workflows\\default\\anyclaw_webpage.html'"}`}},
+				{ID: "tool-edge", Type: "function", Function: llm.FunctionCall{Name: "run_command", Arguments: `{"command":"Start-Process 'msedge.exe' -ArgumentList 'D:\\anyclaw\\anyclaw\\workflows\\default\\anyclaw_webpage.html'"}`}},
+				{ID: "tool-proc", Type: "function", Function: llm.FunctionCall{Name: "run_command", Arguments: `{"command":"Get-Process msedge"}`}},
+				{ID: "tool-observe", Type: "function", Function: llm.FunctionCall{Name: "computer_observe", Arguments: `{}`}},
+			}},
+		},
+		errs: []error{nil, context.DeadlineExceeded},
+	}
+
+	ag := New(Config{
+		Name:        "assistant",
+		Description: "General helper",
+		LLM:         llmStub,
+		Memory:      mem,
+		Skills:      skills.NewSkillsManager(""),
+		Tools:       registry,
+	})
+
+	result, err := ag.Run(context.Background(), "帮我启动你创建的页面")
+	if err != nil {
+		t.Fatalf("Run should complete from page open tool evidence: %v", err)
+	}
+	for _, want := range []string{
+		"已启动浏览器打开 D:\\anyclaw\\anyclaw\\workflows\\default\\anyclaw_webpage.html",
+		"已确认目标文件存在",
+		"已检测到浏览器进程正在运行",
+		"桌面窗口列表中已出现浏览器窗口",
+		"未确认/阻塞：\n- 无",
+	} {
+		if !strings.Contains(result, want) {
+			t.Fatalf("expected fallback result to contain %q, got %q", want, result)
+		}
+	}
+	for _, noisy := range []string{"run_command completed", "computer_observe completed", "已完成 `run_command`"} {
+		if strings.Contains(result, noisy) {
+			t.Fatalf("did not expect raw tool-log phrasing %q in result: %q", noisy, result)
+		}
+	}
+}
+
+func TestAgentRunDoesNotExposeMaxToolCallsMarker(t *testing.T) {
+	mem := memory.NewFileMemory(t.TempDir())
+	if err := mem.Init(); err != nil {
+		t.Fatalf("memory init: %v", err)
+	}
+	registry := tools.NewRegistry()
+	registry.RegisterTool("run_command", "Run a shell command", map[string]any{}, func(ctx context.Context, input map[string]any) (string, error) {
+		return "still running", nil
+	})
+	toolTurn := &llm.Response{
+		ToolCalls: []llm.ToolCall{
+			{
+				ID:   "tool-repeat",
+				Type: "function",
+				Function: llm.FunctionCall{
+					Name:      "run_command",
+					Arguments: `{"command":"echo hi"}`,
+				},
+			},
+		},
+	}
+	llmStub := &stubAgentLLM{responses: []*llm.Response{}}
+	for i := 0; i < 12; i++ {
+		llmStub.responses = append(llmStub.responses, toolTurn)
+	}
+
+	ag := New(Config{
+		Name:        "assistant",
+		Description: "General helper",
+		LLM:         llmStub,
+		Memory:      mem,
+		Skills:      skills.NewSkillsManager(""),
+		Tools:       registry,
+	})
+	ag.maxToolCalls = 1
+
+	result, err := ag.Run(context.Background(), "repeat tool calls")
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if strings.Contains(result, "[Max tool calls reached]") {
+		t.Fatalf("did not expect internal marker in result: %q", result)
+	}
+	if !strings.Contains(result, "工具调用次数达到上限") {
+		t.Fatalf("expected tool limit message, got %q", result)
+	}
+	if strings.Contains(result, "已完成 `run_command`") {
+		t.Fatalf("did not expect run_command to be reported as completed fallback, got %q", result)
+	}
+}
+
+func TestAgentRunUsesCompactStructuredObservationForLargeToolResult(t *testing.T) {
+	mem := memory.NewFileMemory(t.TempDir())
+	if err := mem.Init(); err != nil {
+		t.Fatalf("memory init: %v", err)
+	}
+	largeOutput := strings.Repeat("large-output-", 900)
+	registry := tools.NewRegistry()
+	registry.RegisterTool("run_command", "Run a shell command", map[string]any{}, func(ctx context.Context, input map[string]any) (string, error) {
+		return largeOutput, nil
+	})
+
+	llmStub := &stubAgentLLM{responses: []*llm.Response{
+		{
+			ToolCalls: []llm.ToolCall{
+				{
+					ID:   "tool-large",
+					Type: "function",
+					Function: llm.FunctionCall{
+						Name:      "run_command",
+						Arguments: `{"command":"produce large output"}`,
+					},
+				},
+			},
+		},
+		{Content: "done"},
+	}}
+
+	ag := New(Config{
+		Name:        "assistant",
+		Description: "General helper",
+		LLM:         llmStub,
+		Memory:      mem,
+		Skills:      skills.NewSkillsManager(""),
+		Tools:       registry,
+	})
+
+	if _, err := ag.Run(context.Background(), "run command with large output"); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(llmStub.messages) < 2 {
+		t.Fatalf("expected second llm turn after tool call, got %d", len(llmStub.messages))
+	}
+	var toolMessage *llm.Message
+	for i := range llmStub.messages[1] {
+		msg := &llmStub.messages[1][i]
+		if msg.Role == "tool" {
+			toolMessage = msg
+			break
+		}
+	}
+	if toolMessage == nil {
+		t.Fatalf("expected structured tool message in second turn, got %#v", llmStub.messages[1])
+	}
+	if !strings.Contains(toolMessage.Content, `"type":"codex_tool_observation"`) {
+		t.Fatalf("expected codex observation JSON, got %q", toolMessage.Content)
+	}
+	if !strings.Contains(toolMessage.Content, `"output_truncated":true`) {
+		t.Fatalf("expected truncated observation, got %q", toolMessage.Content)
+	}
+	if len(toolMessage.Content) >= len(largeOutput) {
+		t.Fatalf("expected compact tool message shorter than raw output, got %d >= %d", len(toolMessage.Content), len(largeOutput))
+	}
+	if !strings.Contains(toolMessage.Content, fmt.Sprintf(`"output_chars":%d`, len(largeOutput))) {
+		t.Fatalf("expected original output length metadata, got %q", toolMessage.Content)
+	}
+}
+
+func TestResumeAfterApprovalUsesCodexObservations(t *testing.T) {
+	mem := memory.NewFileMemory(t.TempDir())
+	if err := mem.Init(); err != nil {
+		t.Fatalf("memory init: %v", err)
+	}
+	legacyOutput := strings.Repeat("legacy-output-", 900)
+	pendingOutput := strings.Repeat("pending-output-", 900)
+	registry := tools.NewRegistry()
+	registry.RegisterTool("run_command", "Run a shell command", map[string]any{}, func(ctx context.Context, input map[string]any) (string, error) {
+		return pendingOutput, nil
+	})
+
+	llmStub := &stubAgentLLM{responses: []*llm.Response{{Content: "resumed done"}}}
+	ag := New(Config{
+		Name:        "assistant",
+		Description: "General helper",
+		LLM:         llmStub,
+		Memory:      mem,
+		Skills:      skills.NewSkillsManager(""),
+		Tools:       registry,
+	})
+
+	resume := ApprovalResumeState{
+		Messages: []llm.Message{
+			{Role: "system", Content: "system"},
+			{Role: "user", Content: "run two commands"},
+		},
+		AssistantMessage: llm.Message{
+			Role: "assistant",
+			ToolCalls: []llm.ToolCall{
+				{
+					ID:   "tool-old",
+					Type: "function",
+					Function: llm.FunctionCall{
+						Name:      "run_command",
+						Arguments: `{"command":"old"}`,
+					},
+				},
+				{
+					ID:   "tool-pending",
+					Type: "function",
+					Function: llm.FunctionCall{
+						Name:      "run_command",
+						Arguments: `{"command":"pending"}`,
+					},
+				},
+			},
+		},
+		Observations: []ToolObservation{
+			newToolObservation(ToolCall{
+				ID:   "tool-old",
+				Name: "run_command",
+				Args: map[string]any{"command": "old"},
+			}, legacyOutput, nil),
+		},
+		PendingTool: ToolCall{ID: "tool-pending", Name: "run_command", Args: map[string]any{"command": "pending"}},
+	}
+
+	if _, err := ag.ResumeAfterApproval(context.Background(), resume); err != nil {
+		t.Fatalf("ResumeAfterApproval: %v", err)
+	}
+	if len(llmStub.messages) != 1 {
+		t.Fatalf("expected one resumed llm call, got %d", len(llmStub.messages))
+	}
+	for _, msg := range llmStub.messages[0] {
+		if msg.Role != "tool" {
+			continue
+		}
+		if !strings.Contains(msg.Content, `"type":"codex_tool_observation"`) {
+			t.Fatalf("expected compact observation, got %q", msg.Content)
+		}
+		if len(msg.Content) >= len(legacyOutput) {
+			t.Fatalf("expected codex tool output to be compacted, got %d >= %d", len(msg.Content), len(legacyOutput))
+		}
+	}
+}
+
+func TestAgentRunSummarizesOlderToolObservationsAcrossTurns(t *testing.T) {
+	mem := memory.NewFileMemory(t.TempDir())
+	if err := mem.Init(); err != nil {
+		t.Fatalf("memory init: %v", err)
+	}
+	registry := tools.NewRegistry()
+	registry.RegisterTool("run_command", "Run a shell command", map[string]any{}, func(ctx context.Context, input map[string]any) (string, error) {
+		return strings.Repeat("turn-output-", 500), nil
+	})
+
+	toolTurn := func(id string) *llm.Response {
+		return &llm.Response{
+			ToolCalls: []llm.ToolCall{
+				{
+					ID:   id,
+					Type: "function",
+					Function: llm.FunctionCall{
+						Name:      "run_command",
+						Arguments: fmt.Sprintf(`{"command":"cmd-%s"}`, id),
+					},
+				},
+			},
+		}
+	}
+	llmStub := &stubAgentLLM{responses: []*llm.Response{
+		toolTurn("tool-1"),
+		toolTurn("tool-2"),
+		toolTurn("tool-3"),
+		toolTurn("tool-4"),
+		toolTurn("tool-5"),
+		toolTurn("tool-6"),
+		toolTurn("tool-7"),
+		{Content: "done"},
+	}}
+
+	ag := New(Config{
+		Name:        "assistant",
+		Description: "General helper",
+		LLM:         llmStub,
+		Memory:      mem,
+		Skills:      skills.NewSkillsManager(""),
+		Tools:       registry,
+	})
+
+	if _, err := ag.Run(context.Background(), "run many tool turns"); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	lastBatch := llmStub.messages[len(llmStub.messages)-1]
+	var summarizedOld bool
+	var recentWithOutput int
+	for _, msg := range lastBatch {
+		if msg.Role != "tool" {
+			continue
+		}
+		if strings.Contains(msg.Content, `"output":"`) {
+			recentWithOutput++
+		}
+		if strings.Contains(msg.Content, `"tool_call_id":"tool-1"`) && !strings.Contains(msg.Content, `"output":"`) && strings.Contains(msg.Content, `"output_truncated":true`) {
+			summarizedOld = true
+		}
+	}
+	if !summarizedOld {
+		t.Fatalf("expected oldest tool observation to be summary-only, got %#v", lastBatch)
+	}
+	if recentWithOutput > codexLoopRecentToolOutputs {
+		t.Fatalf("expected at most %d recent outputs, got %d", codexLoopRecentToolOutputs, recentWithOutput)
 	}
 }
 
@@ -1159,7 +1712,7 @@ description: Video editing harness
 	return writeAgentJSON(filepath.Join(root, "registry.json"), payload)
 }
 
-func TestAgentRunCompletesBootstrapRitualBeforeCallingLLM(t *testing.T) {
+func TestAgentRunSkipsDeletedBootstrapRitual(t *testing.T) {
 	workDir := t.TempDir()
 	mem := memory.NewFileMemory(workDir)
 	mem.SetDailyDir(filepath.Join(workDir, "workspace", "memory"))
@@ -1187,55 +1740,13 @@ func TestAgentRunCompletesBootstrapRitualBeforeCallingLLM(t *testing.T) {
 
 	answer, err := ag.Run(context.Background(), "help me with this repo")
 	if err != nil {
-		t.Fatalf("Run(q1): %v", err)
+		t.Fatalf("Run: %v", err)
 	}
-	if !strings.Contains(answer, "Question 1/4") {
-		t.Fatalf("expected bootstrap question, got %q", answer)
-	}
-	if len(llmStub.messages) != 0 {
-		t.Fatalf("expected llm not to be called during bootstrap, got %d calls", len(llmStub.messages))
-	}
-
-	sequence := []string{
-		"Call me Alex and default to Chinese.",
-		"Mainly help with Go coding and local automation.",
-		"Be concise, proactive, and optimize for correctness first.",
-		"Do not use destructive commands without explicit confirmation.",
-	}
-	for i, input := range sequence {
-		answer, err = ag.Run(context.Background(), input)
-		if err != nil {
-			t.Fatalf("Run(answer %d): %v", i+1, err)
-		}
-	}
-
-	if !strings.Contains(answer, "Workspace bootstrap complete") {
-		t.Fatalf("expected bootstrap completion message, got %q", answer)
-	}
-	if _, err := os.Stat(filepath.Join(workingDir, "BOOTSTRAP.md")); !os.IsNotExist(err) {
-		t.Fatalf("expected BOOTSTRAP.md to be removed, stat err=%v", err)
-	}
-	if _, err := os.Stat(filepath.Join(workingDir, ".anyclaw-bootstrap-state.json")); !os.IsNotExist(err) {
-		t.Fatalf("expected bootstrap state file to be removed, stat err=%v", err)
-	}
-
-	identityData, err := os.ReadFile(filepath.Join(workingDir, "IDENTITY.md"))
-	if err != nil {
-		t.Fatalf("ReadFile(IDENTITY.md): %v", err)
-	}
-	if !strings.Contains(string(identityData), "Mainly help with Go coding and local automation.") {
-		t.Fatalf("expected IDENTITY.md to include bootstrap answer, got %q", string(identityData))
-	}
-
-	normalResponse, err := ag.Run(context.Background(), "now answer normally")
-	if err != nil {
-		t.Fatalf("Run(normal): %v", err)
-	}
-	if normalResponse != "normal task response" {
-		t.Fatalf("expected normal llm response after bootstrap, got %q", normalResponse)
+	if answer != "normal task response" {
+		t.Fatalf("expected normal llm response after deleted bootstrap ritual, got %q", answer)
 	}
 	if len(llmStub.messages) != 1 {
-		t.Fatalf("expected one llm call after bootstrap, got %d", len(llmStub.messages))
+		t.Fatalf("expected llm to be called directly, got %d calls", len(llmStub.messages))
 	}
 }
 
@@ -1253,14 +1764,14 @@ func TestAgentRunCompactsHistoryAndEnforcesWindowLimit(t *testing.T) {
 		Memory:           mem,
 		Skills:           skills.NewSkillsManager(""),
 		Tools:            tools.NewRegistry(),
-		MaxContextTokens: 700,
+		MaxContextTokens: 1100,
 	})
 
 	history := make([]prompt.Message, 0, 16)
 	for i := 0; i < 8; i++ {
 		history = append(history,
-			prompt.Message{Role: "user", Content: fmt.Sprintf("old-user-%d %s", i, strings.Repeat("x", 120))},
-			prompt.Message{Role: "assistant", Content: fmt.Sprintf("old-assistant-%d %s", i, strings.Repeat("y", 120))},
+			prompt.Message{Role: "user", Content: fmt.Sprintf("old-user-%d %s", i, strings.Repeat("x", 240))},
+			prompt.Message{Role: "assistant", Content: fmt.Sprintf("old-assistant-%d %s", i, strings.Repeat("y", 240))},
 		)
 	}
 	ag.SetHistory(history)
@@ -1293,6 +1804,57 @@ func TestAgentRunCompactsHistoryAndEnforcesWindowLimit(t *testing.T) {
 	}
 	if foundOldest {
 		t.Fatalf("expected oldest history to be compacted away, got %#v", mainBatch)
+	}
+}
+
+func TestAgentRunAccountsForToolDefinitionsInContextBudget(t *testing.T) {
+	mem := memory.NewFileMemory(t.TempDir())
+	if err := mem.Init(); err != nil {
+		t.Fatalf("memory init: %v", err)
+	}
+
+	registry := tools.NewRegistry()
+	largeSchema := map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"content": map[string]any{
+				"type":        "string",
+				"description": strings.Repeat("large schema ", 1200),
+			},
+		},
+	}
+	for _, name := range []string{"read_file", "write_file", "list_directory", "search_files", "run_command"} {
+		registry.RegisterTool(name, strings.Repeat("description ", 80), largeSchema, nil)
+	}
+
+	llmStub := &stubAgentLLM{responses: []*llm.Response{{Content: "ok"}}}
+	ag := New(Config{
+		Name:             "assistant",
+		Description:      "General helper",
+		LLM:              llmStub,
+		Memory:           mem,
+		Skills:           skills.NewSkillsManager(""),
+		Tools:            registry,
+		MaxContextTokens: 3600,
+	})
+
+	result, err := ag.Run(context.Background(), "帮我生成一个贪吃蛇小游戏")
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if result != "ok" {
+		t.Fatalf("unexpected result: %q", result)
+	}
+	if len(llmStub.toolDefs) != 1 {
+		t.Fatalf("expected one main model call, got %d", len(llmStub.toolDefs))
+	}
+	totalBytes := 0
+	for _, def := range llmStub.toolDefs[0] {
+		data, _ := json.Marshal(def)
+		totalBytes += len(data)
+	}
+	if totalBytes > 9000 {
+		t.Fatalf("expected compact tool definitions, got %d bytes across %#v", totalBytes, llmStub.toolDefs[0])
 	}
 }
 

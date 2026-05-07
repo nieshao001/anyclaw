@@ -173,7 +173,8 @@ func Bootstrap(opts BootstrapOptions) (*MainRuntime, error) {
 		return nil, fmt.Errorf("storage: bootstrap workspace %q: %w", workingDir, err)
 	}
 
-	memCfg := memory.DefaultConfig(workDir)
+	memoryWorkDir := memory.CodexMemoryWorkspaceDir(workDir, workingDir)
+	memCfg := memory.DefaultConfig(memoryWorkDir)
 	var secretsSnap *secrets.RuntimeSnapshot
 	if app.SecretsManager != nil {
 		secretsSnap = app.SecretsManager.GetActiveSnapshot()
@@ -191,7 +192,7 @@ func Bootstrap(opts BootstrapOptions) (*MainRuntime, error) {
 		return nil, fmt.Errorf("storage: init memory: %w", err)
 	}
 	if db, ok := mem.(interface{ SetDailyDir(string) }); ok {
-		db.SetDailyDir(filepath.Join(workingDir, "memory"))
+		db.SetDailyDir(filepath.Join(memoryWorkDir, "daily"))
 	}
 
 	if warmupper, ok := mem.(interface {
@@ -286,9 +287,17 @@ func Bootstrap(opts BootstrapOptions) (*MainRuntime, error) {
 
 	registry := tools.NewRegistry()
 	sandboxManager := tools.NewSandboxManager(app.Config.Sandbox, workingDir)
+	permissionOptions := tools.PermissionOptions{
+		SandboxMode:    app.Config.Permissions.SandboxMode,
+		ApprovalPolicy: app.Config.Permissions.ApprovalPolicy,
+		NetworkAccess:  app.Config.Permissions.NetworkAccess,
+		DesktopAccess:  app.Config.Permissions.DesktopAccess,
+	}
+	permissionEngine := tools.NewPermissionEngine(workingDir, permissionOptions)
 	policyEngine := tools.NewPolicyEngine(tools.PolicyOptions{
 		WorkingDir:           workingDir,
 		PermissionLevel:      app.Config.Agent.PermissionLevel,
+		Permissions:          permissionOptions,
 		ProtectedPaths:       app.Config.Security.ProtectedPaths,
 		AllowedReadPaths:     app.Config.Security.AllowedReadPaths,
 		AllowedWritePaths:    app.Config.Security.AllowedWritePaths,
@@ -302,13 +311,15 @@ func Bootstrap(opts BootstrapOptions) (*MainRuntime, error) {
 	builtinOpts := tools.BuiltinOptions{
 		WorkingDir:            workingDir,
 		PermissionLevel:       app.Config.Agent.PermissionLevel,
-		ExecutionMode:         app.Config.Sandbox.ExecutionMode,
+		Permissions:           permissionOptions,
+		ExecutionMode:         runtimeExecutionMode(app.Config.Sandbox.ExecutionMode, sandboxManager),
 		DangerousPatterns:     app.Config.Security.DangerousCommandPatterns,
 		ProtectedPaths:        app.Config.Security.ProtectedPaths,
 		AllowedReadPaths:      app.Config.Security.AllowedReadPaths,
 		AllowedWritePaths:     app.Config.Security.AllowedWritePaths,
 		AllowedEgressDomains:  app.Config.Security.AllowedEgressDomains,
 		Policy:                policyEngine,
+		PermissionEngine:      permissionEngine,
 		CommandTimeoutSeconds: app.Config.Security.CommandTimeoutSeconds,
 		AuditLogger:           auditLogger,
 		Sandbox:               sandboxManager,
@@ -323,8 +334,9 @@ func Bootstrap(opts BootstrapOptions) (*MainRuntime, error) {
 			AllowedApps:           app.Config.Computer.AllowedApps,
 			AllowedDomains:        app.Config.Computer.AllowedDomains,
 		},
-		MemoryBackend: mem,
-		QMDClient:     qmdClient,
+		MemoryBackend:  mem,
+		DailyMemoryDir: filepath.Join(memoryWorkDir, "daily"),
+		QMDClient:      qmdClient,
 	}
 	tools.RegisterBuiltins(registry, builtinOpts)
 	sk.RegisterTools(registry, skills.ExecutionOptions{AllowExec: app.Config.Plugins.AllowExec, ExecTimeoutSeconds: app.Config.Plugins.ExecTimeoutSeconds})
@@ -389,7 +401,7 @@ func Bootstrap(opts BootstrapOptions) (*MainRuntime, error) {
 		MaxContextTokens: deriveAgentContextTokenBudget(app.Config.LLM.MaxTokens),
 	})
 	app.Agent = ag
-	progress(BootEvent{Phase: PhaseAgent, Status: "ok", Message: fmt.Sprintf("permission=%s", app.Config.Agent.PermissionLevel), Dur: time.Since(t)})
+	progress(BootEvent{Phase: PhaseAgent, Status: "ok", Message: fmt.Sprintf("sandbox=%s approval=%s", app.Config.Permissions.SandboxMode, app.Config.Permissions.ApprovalPolicy), Dur: time.Since(t)})
 
 	t = time.Now()
 	if app.Config.Orchestrator.Enabled || len(app.Config.Orchestrator.AgentNames) > 0 || len(app.Config.Orchestrator.SubAgents) > 0 {

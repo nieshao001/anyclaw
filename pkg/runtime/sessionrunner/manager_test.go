@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -141,7 +143,7 @@ func TestRunDirectDesktopOpenVerifiesVisibleBrowserWindow(t *testing.T) {
 	if result == nil {
 		t.Fatal("expected run result")
 	}
-	wantResponse := "Opened https://www.qiniu.com/ in the desktop browser."
+	wantResponse := "已处理：\n- 已打开网页 https://www.qiniu.com/。\n\n已验证：\n- 已确认桌面窗口出现。\n\n未确认/阻塞：\n- 无"
 	if result.Response != wantResponse {
 		t.Fatalf("expected response %q, got %q", wantResponse, result.Response)
 	}
@@ -214,7 +216,7 @@ func TestRunDirectDesktopOpenDoesNotClaimSuccessWithoutVerification(t *testing.T
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	wantResponse := "Attempted to open https://www.qiniu.com/, but could not verify that a desktop browser window appeared."
+	wantResponse := "已处理：\n- 已请求打开网页 https://www.qiniu.com/。\n\n已验证：\n- 未能确认桌面窗口已出现。\n\n未确认/阻塞：\n- desktop browser window did not appear within verification timeout"
 	if result == nil || result.Response != wantResponse {
 		t.Fatalf("expected response %q, got %#v", wantResponse, result)
 	}
@@ -279,7 +281,7 @@ func TestRunDirectDesktopOpenAllowsExistingBrowserWindowReuse(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	wantResponse := "Opened https://www.qiniu.com/ in the desktop browser."
+	wantResponse := "已处理：\n- 已打开网页 https://www.qiniu.com/。\n\n已验证：\n- 已确认桌面窗口出现。\n\n未确认/阻塞：\n- 无"
 	if result == nil || result.Response != wantResponse {
 		t.Fatalf("expected response %q, got %#v", wantResponse, result)
 	}
@@ -341,6 +343,168 @@ func TestRunDirectDesktopOpenIgnoresHardcodedSiteAliases(t *testing.T) {
 	}
 	if openCalled {
 		t.Fatal("did not expect direct desktop_open for implicit site alias")
+	}
+}
+
+func TestRunDirectDesktopOpenLocalHTMLUsesDesktopOpenFile(t *testing.T) {
+	manager, sessions, session, _, _ := newRunManagerTest(t)
+	toolsRegistry := tools.NewRegistry()
+	toolCalls := make([]string, 0, 3)
+	before := marshalWindowSnapshots(t, []desktopWindowSnapshot{{Title: "AnyClaw", ProcessName: "anyclaw", Handle: 11, IsFocused: true}})
+	after := marshalWindowSnapshots(t, []desktopWindowSnapshot{
+		{Title: "AnyClaw", ProcessName: "anyclaw", Handle: 11},
+		{Title: "snake_game.html - Edge", ProcessName: "msedge", Handle: 22, IsFocused: true},
+	})
+	listIndex := 0
+	toolsRegistry.RegisterTool("desktop_open", "Open desktop target", map[string]any{}, func(ctx context.Context, input map[string]any) (string, error) {
+		toolCalls = append(toolCalls, "desktop_open")
+		if got, _ := input["target"].(string); got != "snake_game.html" {
+			t.Fatalf("expected desktop_open target snake_game.html, got %#v", input)
+		}
+		if got, _ := input["kind"].(string); got != "file" {
+			t.Fatalf("expected desktop_open kind file, got %#v", input)
+		}
+		return "opened file", nil
+	})
+	toolsRegistry.RegisterTool("desktop_list_windows", "List desktop windows", map[string]any{}, func(ctx context.Context, input map[string]any) (string, error) {
+		toolCalls = append(toolCalls, "desktop_list_windows")
+		if listIndex == 0 {
+			listIndex++
+			return before, nil
+		}
+		return after, nil
+	})
+	if err := appendApprovedToolApproval(manager.store, session, "desktop_open", map[string]any{"target": "snake_game.html", "kind": "file"}); err != nil {
+		t.Fatalf("appendApprovedToolApproval: %v", err)
+	}
+	runtime := &appruntime.MainRuntime{
+		Config: &config.Config{Agent: config.AgentConfig{RequireConfirmationForDangerous: true}},
+		Tools:  toolsRegistry,
+	}
+	manager.runtimes = testRuntimeProvider{runtime: runtime}
+
+	result, err := manager.Run(context.Background(), RunRequest{
+		SessionID: session.ID,
+		Message:   "帮我打开snake_game.html",
+		Options: RunOptions{
+			Source: "api",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	wantResponse := "已处理：\n- 已打开文件 snake_game.html。\n\n已验证：\n- 已确认桌面窗口出现。\n\n未确认/阻塞：\n- 无"
+	if result == nil || result.Response != wantResponse {
+		t.Fatalf("expected response %q, got %#v", wantResponse, result)
+	}
+	updated, ok := sessions.Get(session.ID)
+	if !ok {
+		t.Fatalf("expected session %s to exist", session.ID)
+	}
+	if len(updated.Messages) != 2 || updated.Messages[1].Content != wantResponse {
+		t.Fatalf("unexpected session messages %#v", updated.Messages)
+	}
+	if len(toolCalls) < 3 || toolCalls[0] != "desktop_list_windows" || toolCalls[1] != "desktop_open" || toolCalls[2] != "desktop_list_windows" {
+		t.Fatalf("unexpected tool call order %#v", toolCalls)
+	}
+}
+
+func TestDirectDesktopOpenTargetResolvesExtensionlessHTML(t *testing.T) {
+	workspace := t.TempDir()
+	if err := os.WriteFile(filepath.Join(workspace, "snake_game.html"), []byte("<html></html>"), 0o644); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+	request, ok := directDesktopOpenTarget("帮我打开snake_game", workspace)
+	if !ok {
+		t.Fatal("expected direct desktop open target")
+	}
+	if request.Kind != "file" || request.Target != "snake_game.html" {
+		t.Fatalf("expected snake_game.html file target, got %#v", request)
+	}
+}
+
+func TestDirectDesktopOpenTargetResolvesGeneratedPageReference(t *testing.T) {
+	workspace := t.TempDir()
+	oldFile := filepath.Join(workspace, "old_page.html")
+	newFile := filepath.Join(workspace, "anyclaw_webpage.html")
+	if err := os.WriteFile(oldFile, []byte("<html>old</html>"), 0o644); err != nil {
+		t.Fatalf("write old fixture: %v", err)
+	}
+	if err := os.WriteFile(newFile, []byte("<html>new</html>"), 0o644); err != nil {
+		t.Fatalf("write new fixture: %v", err)
+	}
+	oldTime := time.Now().Add(-1 * time.Hour)
+	newTime := time.Now()
+	if err := os.Chtimes(oldFile, oldTime, oldTime); err != nil {
+		t.Fatalf("chtimes old fixture: %v", err)
+	}
+	if err := os.Chtimes(newFile, newTime, newTime); err != nil {
+		t.Fatalf("chtimes new fixture: %v", err)
+	}
+
+	for _, message := range []string{
+		"帮我打开你生成的页面",
+		"帮我打开你创建的页面",
+		"open the page you created",
+	} {
+		t.Run(message, func(t *testing.T) {
+			request, ok := directDesktopOpenTarget(message, workspace)
+			if !ok {
+				t.Fatal("expected direct desktop open target")
+			}
+			if request.Kind != "file" || request.Target != "anyclaw_webpage.html" {
+				t.Fatalf("expected newest generated html file target, got %#v", request)
+			}
+		})
+	}
+}
+
+func TestDirectDesktopOpenFileVerificationRequiresNewOrFocusedWindow(t *testing.T) {
+	before := []desktopWindowSnapshot{{Title: "AnyClaw", ProcessName: "anyclaw", Handle: 11, IsFocused: true}}
+	after := []desktopWindowSnapshot{{Title: "AnyClaw", ProcessName: "anyclaw", Handle: 11, IsFocused: true}}
+	if directDesktopOpenVerified(before, after, "file") {
+		t.Fatal("did not expect unchanged existing window to verify file open")
+	}
+	if !directDesktopOpenVerified(before, append(after, desktopWindowSnapshot{Title: "anyclaw_webpage.html - Edge", ProcessName: "msedge", Handle: 22, IsFocused: true}), "file") {
+		t.Fatal("expected new visible window to verify file open")
+	}
+}
+
+func TestDirectDesktopOpenTargetPrefersURLCandidateOverGeneratedPageFallback(t *testing.T) {
+	workspace := t.TempDir()
+	if err := os.WriteFile(filepath.Join(workspace, "anyclaw_webpage.html"), []byte("<html></html>"), 0o644); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+
+	request, ok := directDesktopOpenTarget("帮我打开页面 https://example.com", workspace)
+	if !ok {
+		t.Fatal("expected direct desktop open target")
+	}
+	if request.Kind != "url" || request.Target != "https://example.com" {
+		t.Fatalf("expected URL target to win over generated page fallback, got %#v", request)
+	}
+}
+
+func TestDirectDesktopOpenTargetDoesNotTreatGenericOpenPageAsGeneratedFile(t *testing.T) {
+	workspace := t.TempDir()
+	if err := os.WriteFile(filepath.Join(workspace, "anyclaw_webpage.html"), []byte("<html></html>"), 0o644); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+
+	request, ok := directDesktopOpenTarget("帮我打开页面", workspace)
+	if ok {
+		t.Fatalf("did not expect generic open-page request to resolve local generated file, got %#v", request)
+	}
+}
+
+func TestDirectDesktopOpenTargetRejectsSeparatorOnlyPath(t *testing.T) {
+	for _, message := range []string{`打开 \\`, `open \\`, `打开 /`} {
+		t.Run(message, func(t *testing.T) {
+			request, ok := directDesktopOpenTarget(message, t.TempDir())
+			if ok {
+				t.Fatalf("did not expect separator-only target to resolve, got %#v", request)
+			}
+		})
 	}
 }
 
@@ -538,7 +702,42 @@ func TestRunChannelDoesNotReuseExpiredExactDesktopToolApproval(t *testing.T) {
 	}
 }
 
-func TestRunChannelRequiresApprovalForDangerousTools(t *testing.T) {
+func TestRunChannelAllowsPolicyApprovedWorkspaceCommand(t *testing.T) {
+	manager, _, session, approvals, _ := newChannelManagerTest(t)
+
+	manager.execute = func(ctx context.Context, runtime *appruntime.MainRuntime, req appruntime.ExecutionRequest) (*appruntime.ExecutionResult, error) {
+		if req.AgentApprovalHook == nil {
+			t.Fatal("expected AgentApprovalHook to be set for channel execution")
+		}
+		err := req.AgentApprovalHook(ctx, agent.ToolCall{
+			Name: "run_command",
+			Args: map[string]any{"command": "dir"},
+		})
+		if err != nil {
+			return &appruntime.ExecutionResult{}, err
+		}
+		return &appruntime.ExecutionResult{Output: "listed"}, nil
+	}
+
+	result, err := manager.RunChannel(context.Background(), ChannelRunRequest{
+		Source:    "slack",
+		SessionID: session.ID,
+		Message:   "list files",
+		QueueMode: "fifo",
+		Meta:      map[string]string{"user_id": "u-1"},
+	})
+	if err != nil {
+		t.Fatalf("RunChannel: %v", err)
+	}
+	if result == nil || result.Response != "listed" {
+		t.Fatalf("unexpected result %#v", result)
+	}
+	if len(approvals.calls) != 0 {
+		t.Fatalf("expected workspace command to avoid approval, got %#v", approvals.calls)
+	}
+}
+
+func TestRunChannelRequiresApprovalForDangerousCommand(t *testing.T) {
 	manager, sessions, session, approvals, events := newChannelManagerTest(t)
 
 	manager.execute = func(ctx context.Context, runtime *appruntime.MainRuntime, req appruntime.ExecutionRequest) (*appruntime.ExecutionResult, error) {
@@ -664,13 +863,66 @@ func TestRunChannelExecutionErrorsDrainQueuedTurn(t *testing.T) {
 			if updated.QueueDepth != 0 {
 				t.Fatalf("expected queue depth 0 after failure, got %d", updated.QueueDepth)
 			}
-			if len(updated.Messages) != 1 || updated.Messages[0].Role != "user" || updated.Messages[0].Content != "please fail" {
-				t.Fatalf("expected pending user message to be preserved after failure, got %#v", updated.Messages)
+			if len(updated.Messages) != 2 || updated.Messages[0].Role != "user" || updated.Messages[0].Content != "please fail" {
+				t.Fatalf("expected pending user message and visible failure response after failure, got %#v", updated.Messages)
+			}
+			if updated.Messages[1].Role != "assistant" || !strings.Contains(updated.Messages[1].Content, "这次任务没有完成") || !strings.Contains(updated.Messages[1].Content, "runtime exploded") {
+				t.Fatalf("expected visible assistant failure response, got %#v", updated.Messages[1])
 			}
 			if !hasEvent(events.events, "chat.failed") {
 				t.Fatal("expected chat.failed event on channel execution error")
 			}
 		})
+	}
+}
+
+func TestRunChannelCompletesWhenRuntimeReturnsSuccessfulToolActivityAndLLMError(t *testing.T) {
+	manager, sessions, session, _, events := newChannelManagerTest(t)
+	runErr := errors.New("context deadline exceeded")
+	manager.execute = func(ctx context.Context, runtime *appruntime.MainRuntime, req appruntime.ExecutionRequest) (*appruntime.ExecutionResult, error) {
+		return &appruntime.ExecutionResult{
+			ToolActivities: []agent.ToolActivity{
+				{
+					ToolName: "desktop_open",
+					Args:     map[string]any{"target": "snake_game.html", "kind": "file"},
+					Result:   "opened file",
+				},
+			},
+		}, runErr
+	}
+
+	result, err := manager.RunChannel(context.Background(), ChannelRunRequest{
+		Source:    "api",
+		SessionID: session.ID,
+		Message:   "perform the desktop tool task",
+		QueueMode: "fifo",
+		Meta:      map[string]string{"user_id": "u-1"},
+	})
+	if err != nil {
+		t.Fatalf("expected successful tool activity to complete run, got %v", err)
+	}
+	if result == nil || !strings.Contains(result.Response, "已处理") || !strings.Contains(result.Response, "已打开文件 snake_game.html") {
+		t.Fatalf("unexpected fallback result %#v", result)
+	}
+	updated, ok := sessions.Get(session.ID)
+	if !ok {
+		t.Fatalf("expected session %s to exist", session.ID)
+	}
+	if updated.Presence != "idle" {
+		t.Fatalf("expected idle presence, got %q", updated.Presence)
+	}
+	if len(updated.Messages) != 2 || updated.Messages[1].Role != "assistant" || !strings.Contains(updated.Messages[1].Content, "已处理") {
+		t.Fatalf("unexpected session messages %#v", updated.Messages)
+	}
+	activities := manager.store.ListToolActivities(10, session.ID)
+	if len(activities) != 1 || activities[0].ToolName != "desktop_open" || activities[0].Error != "" {
+		t.Fatalf("expected recorded desktop_open activity, got %#v", activities)
+	}
+	if !hasEvent(events.events, "chat.completed") {
+		t.Fatal("expected chat.completed event")
+	}
+	if hasEvent(events.events, "chat.failed") {
+		t.Fatal("did not expect chat.failed event")
 	}
 }
 

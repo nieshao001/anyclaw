@@ -2,7 +2,6 @@ package gateway
 
 import (
 	"encoding/json"
-	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
@@ -64,9 +63,10 @@ func (s *Server) handleConfigAPI(w http.ResponseWriter, r *http.Request) {
 }
 
 type configReadView struct {
-	Agent    configReadAgentView    `json:"agent"`
-	LLM      configReadLLMView      `json:"llm"`
-	Channels configReadChannelsView `json:"channels"`
+	Permissions config.PermissionsConfig `json:"permissions"`
+	Agent       configReadAgentView      `json:"agent"`
+	LLM         configReadLLMView        `json:"llm"`
+	Channels    configReadChannelsView   `json:"channels"`
 }
 
 type configReadAgentView struct {
@@ -89,6 +89,7 @@ func (s *Server) configAPIView() configReadView {
 	}
 	cfg := s.mainRuntime.Config
 	return configReadView{
+		Permissions: cfg.Permissions,
 		Agent: configReadAgentView{
 			PermissionLevel: cfg.Agent.PermissionLevel,
 		},
@@ -117,41 +118,73 @@ func (s *Server) applyLLMConfigPatch(cfg map[string]any) {
 }
 
 func (s *Server) applyAgentConfigPatch(cfg map[string]any) (bool, error) {
-	agentCfg, ok := cfg["agent"].(map[string]any)
-	if !ok {
-		return false, nil
-	}
-	permissionLevel, ok := agentCfg["permission_level"].(string)
-	if !ok {
-		return false, nil
-	}
-	permissionLevel = strings.TrimSpace(permissionLevel)
-	if permissionLevel == "" {
-		return false, nil
-	}
-	if !isValidPermissionLevel(permissionLevel) {
-		return false, fmt.Errorf("agent.permission_level must be one of: full, limited, read-only (got %q)", permissionLevel)
-	}
-	profileChanged := false
-	if profile, ok := s.mainRuntime.Config.ResolveMainAgentProfile(); ok {
-		profileChanged = strings.TrimSpace(profile.PermissionLevel) != permissionLevel
-		profile.PermissionLevel = permissionLevel
-		if err := s.mainRuntime.Config.UpsertAgentProfile(profile); err != nil {
-			return false, err
+	changed := false
+	if agentCfg, ok := cfg["agent"].(map[string]any); ok {
+		if value, ok := agentCfg["permission_level"].(string); ok && strings.TrimSpace(value) != "" {
+			nextLevel := strings.TrimSpace(strings.ToLower(value))
+			if err := validateAgentPermissionLevel(nextLevel); err != nil {
+				return false, err
+			}
+			if s.mainRuntime.Config.Agent.PermissionLevel != nextLevel {
+				s.mainRuntime.Config.Agent.PermissionLevel = nextLevel
+				changed = true
+			}
+			if s.updateCurrentAgentProfilePermission(nextLevel) {
+				changed = true
+			}
 		}
 	}
-	configChanged := strings.TrimSpace(s.mainRuntime.Config.Agent.PermissionLevel) != permissionLevel
-	s.mainRuntime.Config.Agent.PermissionLevel = permissionLevel
-	return profileChanged || configChanged, nil
+
+	permissionsCfg, ok := cfg["permissions"].(map[string]any)
+	if !ok {
+		return changed, nil
+	}
+	next := s.mainRuntime.Config.Permissions
+	if value, ok := permissionsCfg["sandbox_mode"].(string); ok && strings.TrimSpace(value) != "" {
+		next.SandboxMode = strings.TrimSpace(strings.ToLower(value))
+	}
+	if value, ok := permissionsCfg["approval_policy"].(string); ok && strings.TrimSpace(value) != "" {
+		next.ApprovalPolicy = strings.TrimSpace(strings.ToLower(value))
+	}
+	if value, ok := permissionsCfg["network_access"].(string); ok && strings.TrimSpace(value) != "" {
+		next.NetworkAccess = strings.TrimSpace(strings.ToLower(value))
+	}
+	if value, ok := permissionsCfg["desktop_access"].(string); ok && strings.TrimSpace(value) != "" {
+		next.DesktopAccess = strings.TrimSpace(strings.ToLower(value))
+	}
+	if err := validatePermissionsConfig(next); err != nil {
+		return false, err
+	}
+	changed = changed || s.mainRuntime.Config.Permissions != next
+	s.mainRuntime.Config.Permissions = next
+	return changed, nil
 }
 
-func isValidPermissionLevel(level string) bool {
-	switch strings.TrimSpace(level) {
-	case "full", "limited", "read-only":
-		return true
-	default:
+func (s *Server) updateCurrentAgentProfilePermission(permissionLevel string) bool {
+	if s == nil || s.mainRuntime == nil || s.mainRuntime.Config == nil {
 		return false
 	}
+	profile, ok := s.mainRuntime.Config.ResolveMainAgentProfile()
+	if !ok {
+		return false
+	}
+	if profile.PermissionLevel == permissionLevel {
+		return false
+	}
+	profile.PermissionLevel = permissionLevel
+	return s.mainRuntime.Config.UpsertAgentProfile(profile) == nil
+}
+
+func validateAgentPermissionLevel(level string) error {
+	cfg := config.DefaultConfig()
+	cfg.Agent.PermissionLevel = strings.TrimSpace(strings.ToLower(level))
+	return cfg.Validate()
+}
+
+func validatePermissionsConfig(permissions config.PermissionsConfig) error {
+	cfg := config.DefaultConfig()
+	cfg.Permissions = permissions
+	return cfg.Validate()
 }
 
 func (s *Server) applyChannelRoutingPatch(cfg map[string]any) error {

@@ -8,6 +8,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestProviderRequiresAPIKey(t *testing.T) {
@@ -130,6 +131,44 @@ func TestChatOpenAICompatibleSupportsContentBlocks(t *testing.T) {
 	}
 	if resp.Content != "hello world" {
 		t.Fatalf("expected merged block text, got %q", resp.Content)
+	}
+}
+
+func TestChatOpenAICompatibleWrapsDeadlineWithDiagnostics(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(20 * time.Millisecond)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"late"},"finish_reason":"stop"}]}`))
+	}))
+	defer server.Close()
+
+	client, err := NewClient(Config{
+		Provider: "compatible",
+		Model:    "demo-model",
+		APIKey:   "test-key",
+		BaseURL:  server.URL,
+	})
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Millisecond)
+	defer cancel()
+	_, err = client.Chat(ctx, []Message{{Role: "user", Content: "hi"}}, []ToolDefinition{
+		{Type: "function", Function: ToolFunctionDefinition{Name: "run_command"}},
+	})
+	if err == nil {
+		t.Fatal("expected timeout error")
+	}
+	reqErr, ok := err.(*RequestError)
+	if !ok {
+		t.Fatalf("expected RequestError, got %T: %v", err, err)
+	}
+	if reqErr.Kind != "模型请求超时" {
+		t.Fatalf("expected timeout kind, got %q", reqErr.Kind)
+	}
+	if reqErr.Diagnostics.MessageCount != 1 || reqErr.Diagnostics.ToolCount != 1 || reqErr.Diagnostics.RequestBytes == 0 || reqErr.Diagnostics.EstimatedTokens == 0 {
+		t.Fatalf("expected request diagnostics to be populated, got %#v", reqErr.Diagnostics)
 	}
 }
 

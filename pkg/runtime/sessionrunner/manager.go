@@ -6,6 +6,9 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"os"
+	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -183,28 +186,24 @@ func (m *Manager) Run(ctx context.Context, req RunRequest) (*RunResult, error) {
 			}
 			m.updateSessionApprovalPresence(sessionID, "")
 		} else {
+			if fallback, completed := agent.ToolActivitiesCompletionMessage(execResultToolActivities(execResult), err); completed {
+				updatedSession, finishErr := m.completeRunWithResponse(sessionID, req.Message, source, req.Options.Resume, persistedSession, fallback, execResultToolActivities(execResult))
+				if finishErr != nil {
+					failedSession := m.failRun(sessionID, req.Message, source, req.Options.Resume, persistedSession, finishErr)
+					return &RunResult{Response: fallback, Session: failedSession}, finishErr
+				}
+				return &RunResult{Response: fallback, Session: updatedSession}, nil
+			}
 			persistedSession = m.failRun(sessionID, req.Message, source, req.Options.Resume, persistedSession, err)
 		}
 		return &RunResult{Response: response, Session: persistedSession}, err
 	}
 
-	var updatedSession *state.Session
-	if req.Options.Resume {
-		updatedSession, err = m.sessions.AddAssistantMessage(sessionID, response)
-	} else {
-		updatedSession, err = m.sessions.AddExchange(sessionID, req.Message, response)
-	}
+	updatedSession, err := m.completeRunWithResponse(sessionID, req.Message, source, req.Options.Resume, session, response, execResultToolActivities(execResult))
 	if err != nil {
 		failedSession := m.failRun(sessionID, req.Message, source, req.Options.Resume, session, err)
 		return &RunResult{Response: response, Session: failedSession}, err
 	}
-	if _, err := m.sessions.SetPresence(sessionID, "idle", false); err == nil {
-		m.appendEvent("session.presence", sessionID, map[string]any{"presence": "idle", "source": source})
-	}
-	if execResult != nil {
-		m.RecordToolActivities(updatedSession, execResult.ToolActivities)
-	}
-	m.appendEvent("chat.completed", sessionID, map[string]any{"message": req.Message, "response_length": len(response), "source": source})
 	return &RunResult{Response: response, Session: updatedSession}, nil
 }
 
@@ -273,31 +272,47 @@ func (m *Manager) handleChannelExecutionError(req ChannelRunRequest, session *st
 		return &RunResult{Response: response, Session: persistedSession}, runErr
 	}
 
+	if fallback, completed := agent.ToolActivitiesCompletionMessage(activities, runErr); completed {
+		updatedSession, err := m.finishChannelExecution(req, fallback, activities)
+		if err != nil {
+			return &RunResult{Response: fallback, Session: persistedSession}, err
+		}
+		return &RunResult{Response: fallback, Session: updatedSession}, nil
+	}
+
 	persistedSession = m.failRun(req.SessionID, req.Message, req.Source, false, persistedSession, runErr)
 	return &RunResult{Response: response, Session: persistedSession}, runErr
 }
 
 func (m *Manager) ToolApprovalHook(session *state.Session, cfg *config.Config, meta ApprovalContext) agent.ToolApprovalHook {
-	if m == nil || m.approvals == nil || cfg == nil || !cfg.Agent.RequireConfirmationForDangerous || session == nil {
+	if m == nil || m.approvals == nil || cfg == nil || session == nil {
 		return nil
 	}
 	return func(ctx context.Context, tc agent.ToolCall) error {
-		approved, err := m.requireToolApproval(session, cfg, meta, tc.Name, tc.Args, tc.RequiresApproval)
-		if err == nil && approved && sessionApprovalCapability(tc.Name) == tools.HostReviewedCapabilityDesktop {
-			tools.GrantHostReviewedCapability(ctx, tools.HostReviewedCapabilityDesktop)
+		action, decision := sessionPermissionDecision(cfg, tc.Name, tc.Args)
+		approved, err := m.requirePermissionApproval(session, cfg, meta, tc.Name, tc.Args, action, decision, tc.RequiresApproval)
+		if err == nil && approved {
+			tools.GrantPermissionAction(ctx, action)
+			if action.Capability == tools.HostReviewedCapabilityDesktop {
+				tools.GrantHostReviewedCapability(ctx, tools.HostReviewedCapabilityDesktop)
+			}
 		}
 		return err
 	}
 }
 
 func (m *Manager) ProtocolApprovalHook(session *state.Session, cfg *config.Config, meta ApprovalContext) tools.ToolApprovalHook {
-	if m == nil || m.approvals == nil || cfg == nil || !cfg.Agent.RequireConfirmationForDangerous || session == nil {
+	if m == nil || m.approvals == nil || cfg == nil || session == nil {
 		return nil
 	}
 	return func(ctx context.Context, call tools.ToolApprovalCall) error {
-		approved, err := m.requireToolApproval(session, cfg, meta, call.Name, call.Args)
-		if err == nil && approved && sessionApprovalCapability(call.Name) == tools.HostReviewedCapabilityDesktop {
-			tools.GrantHostReviewedCapability(ctx, tools.HostReviewedCapabilityDesktop)
+		action, decision := sessionPermissionDecision(cfg, call.Name, call.Args)
+		approved, err := m.requirePermissionApproval(session, cfg, meta, call.Name, call.Args, action, decision)
+		if err == nil && approved {
+			tools.GrantPermissionAction(ctx, action)
+			if action.Capability == tools.HostReviewedCapabilityDesktop {
+				tools.GrantHostReviewedCapability(ctx, tools.HostReviewedCapabilityDesktop)
+			}
 		}
 		return err
 	}
@@ -306,6 +321,36 @@ func (m *Manager) ProtocolApprovalHook(session *state.Session, cfg *config.Confi
 func (m *Manager) RequireToolApproval(session *state.Session, meta ApprovalContext, toolName string, args map[string]any, forceApproval ...bool) error {
 	_, err := m.requireToolApproval(session, nil, meta, toolName, args, forceApproval...)
 	return err
+}
+
+func (m *Manager) requirePermissionApproval(session *state.Session, cfg *config.Config, meta ApprovalContext, toolName string, args map[string]any, action tools.PermissionAction, decision tools.PermissionResult, forceApproval ...bool) (bool, error) {
+	if len(forceApproval) > 0 {
+		for _, force := range forceApproval {
+			if force {
+				decision.Decision = tools.DecisionAsk
+				if strings.TrimSpace(decision.Reason) == "" {
+					decision.Reason = "tool requested permission approval"
+				}
+				break
+			}
+		}
+	}
+	switch decision.Decision {
+	case tools.DecisionAllow:
+		if requiresExplicitToolApproval(forceApproval...) {
+			return m.requireToolApproval(session, cfg, meta, toolName, args, true)
+		}
+		return false, nil
+	case tools.DecisionDeny:
+		if strings.TrimSpace(decision.Reason) == "" {
+			decision.Reason = "operation denied by permissions policy"
+		}
+		return false, fmt.Errorf("%s", decision.Reason)
+	case tools.DecisionAsk:
+		return m.requireToolApproval(session, cfg, meta, toolName, args, true)
+	default:
+		return false, nil
+	}
 }
 
 func (m *Manager) requireToolApproval(session *state.Session, cfg *config.Config, meta ApprovalContext, toolName string, args map[string]any, forceApproval ...bool) (bool, error) {
@@ -329,6 +374,10 @@ func (m *Manager) requireToolApproval(session *state.Session, cfg *config.Config
 	payload["capability"] = sessionApprovalCapability(toolName)
 	payload["grant_scope"] = "session"
 	payload["grant_ttl_minutes"] = 15
+	if cfg != nil {
+		action, decision := sessionPermissionDecision(cfg, toolName, args)
+		applySessionPermissionPayload(payload, cfg, action, decision)
+	}
 	if description := approvalDescription(toolName, args); description != "" {
 		payload["description"] = description
 	}
@@ -369,6 +418,32 @@ func (m *Manager) requireToolApproval(session *state.Session, cfg *config.Config
 	return false, ErrTaskWaitingApproval
 }
 
+func applySessionPermissionPayload(payload map[string]any, cfg *config.Config, action tools.PermissionAction, decision tools.PermissionResult) {
+	if payload == nil || cfg == nil {
+		return
+	}
+	payload["permission_kind"] = action.Kind
+	payload["permission_reason"] = decision.Reason
+	payload["sandbox_mode"] = cfg.Permissions.SandboxMode
+	payload["approval_policy"] = cfg.Permissions.ApprovalPolicy
+	payload["network_access"] = cfg.Permissions.NetworkAccess
+	payload["desktop_access"] = cfg.Permissions.DesktopAccess
+	if action.Capability != "" {
+		payload["capability"] = action.Capability
+	}
+	switch action.Kind {
+	case "read", "write", "delete":
+		payload["target"] = action.Path
+	case "execute":
+		payload["target"] = action.CWD
+		payload["command"] = action.Command
+	case "network":
+		payload["target"] = action.URL
+	case "desktop":
+		payload["target"] = "local desktop"
+	}
+}
+
 func requiresToolApprovalNameOrFlag(name string, forceApproval ...bool) bool {
 	for _, force := range forceApproval {
 		if force {
@@ -376,6 +451,40 @@ func requiresToolApprovalNameOrFlag(name string, forceApproval ...bool) bool {
 		}
 	}
 	return taskrunner.RequiresToolApprovalName(name)
+}
+
+func requiresExplicitToolApproval(forceApproval ...bool) bool {
+	for _, force := range forceApproval {
+		if force {
+			return true
+		}
+	}
+	return false
+}
+
+func sessionPermissionDecision(cfg *config.Config, toolName string, args map[string]any) (tools.PermissionAction, tools.PermissionResult) {
+	action := tools.PermissionActionForTool(toolName, args, sessionPermissionWorkingDir(cfg))
+	if action.Capability == "" {
+		action.Capability = sessionApprovalCapability(toolName)
+	}
+	engine := tools.NewPermissionEngine(sessionPermissionWorkingDir(cfg), tools.PermissionOptions{
+		SandboxMode:    cfg.Permissions.SandboxMode,
+		ApprovalPolicy: cfg.Permissions.ApprovalPolicy,
+		NetworkAccess:  cfg.Permissions.NetworkAccess,
+		DesktopAccess:  cfg.Permissions.DesktopAccess,
+	})
+	return action, engine.Decide(action)
+}
+
+func sessionPermissionWorkingDir(cfg *config.Config) string {
+	if cfg == nil {
+		return ""
+	}
+	workingDir := strings.TrimSpace(cfg.Agent.WorkingDir)
+	if workingDir == "" {
+		workingDir = strings.TrimSpace(cfg.Agent.WorkDir)
+	}
+	return workingDir
 }
 
 func (m *Manager) ResumeApproved(ctx context.Context, approval *state.Approval) error {
@@ -447,7 +556,7 @@ func (m *Manager) RecordToolActivities(session *state.Session, activities []agen
 }
 
 func (m *Manager) tryDirectDesktopOpen(ctx context.Context, session *state.Session, targetRuntime *appruntime.MainRuntime, meta ApprovalContext, resume bool) (*RunResult, bool, error) {
-	targetURL, browser, ok := directDesktopOpenTarget(meta.Message)
+	request, ok := directDesktopOpenTarget(meta.Message, runtimeWorkingDir(targetRuntime))
 	if !ok || session == nil || targetRuntime == nil {
 		return nil, false, nil
 	}
@@ -455,11 +564,11 @@ func (m *Manager) tryDirectDesktopOpen(ctx context.Context, session *state.Sessi
 	agentName := state.SessionExecutionAgent(session)
 	workspaceID := state.SessionExecutionWorkspace(session)
 	input := map[string]any{
-		"target": targetURL,
-		"kind":   "url",
+		"target": request.Target,
+		"kind":   request.Kind,
 	}
-	if browser != "" {
-		input["browser"] = browser
+	if request.Browser != "" {
+		input["browser"] = request.Browser
 	}
 	approved, err := m.requireToolApproval(session, targetRuntime.Config, meta, "desktop_open", input)
 	if err != nil {
@@ -494,7 +603,7 @@ func (m *Manager) tryDirectDesktopOpen(ctx context.Context, session *state.Sessi
 		Workspace: workspaceID,
 	})
 
-	verified, verificationResult, verificationErr := m.verifyDirectDesktopOpen(ctx, targetRuntime, beforeWindows)
+	verified, verificationResult, verificationErr := m.verifyDirectDesktopOpen(ctx, targetRuntime, beforeWindows, request.Kind)
 	verificationArgs := map[string]any{"timeout_ms": 3000, "interval_ms": 250}
 	if verificationErr == nil {
 		verificationArgs["strategy"] = "desktop_wait_window_or_list_windows"
@@ -519,10 +628,7 @@ func (m *Manager) tryDirectDesktopOpen(ctx context.Context, session *state.Sessi
 		})
 	}
 
-	response := fmt.Sprintf("Attempted to open %s, but could not verify that a desktop browser window appeared.", targetURL)
-	if verified {
-		response = fmt.Sprintf("Opened %s in the desktop browser.", targetURL)
-	}
+	response := directDesktopOpenResponse(request, verified, verificationErr)
 	var updatedSession *state.Session
 	if resume {
 		updatedSession, err = m.sessions.AddAssistantMessage(session.ID, response)
@@ -543,17 +649,17 @@ func (m *Manager) tryDirectDesktopOpen(ctx context.Context, session *state.Sessi
 	return &RunResult{Response: response, Session: updatedSession}, true, nil
 }
 
-func (m *Manager) verifyDirectDesktopOpen(ctx context.Context, targetRuntime *appruntime.MainRuntime, before []desktopWindowSnapshot) (bool, string, error) {
+func (m *Manager) verifyDirectDesktopOpen(ctx context.Context, targetRuntime *appruntime.MainRuntime, before []desktopWindowSnapshot, kind string) (bool, string, error) {
 	deadline := time.Now().Add(3 * time.Second)
 	var lastResult string
 	var lastErr error
 	for {
 		after, err := m.listDirectDesktopOpenWindows(ctx, targetRuntime)
 		if err == nil {
-			if directDesktopOpenVerified(before, after) {
-				return true, directDesktopOpenWindowsSummary(after), nil
+			if directDesktopOpenVerified(before, after, kind) {
+				return true, directDesktopOpenWindowsSummary(after, kind), nil
 			}
-			lastResult = directDesktopOpenWindowsSummary(after)
+			lastResult = directDesktopOpenWindowsSummary(after, kind)
 		} else {
 			lastErr = err
 		}
@@ -678,6 +784,34 @@ func (m *Manager) finishChannelExecution(req ChannelRunRequest, response string,
 	return updatedSession, nil
 }
 
+func (m *Manager) completeRunWithResponse(sessionID string, message string, source string, resume bool, session *state.Session, response string, activities []agent.ToolActivity) (*state.Session, error) {
+	var updatedSession *state.Session
+	var err error
+	if resume {
+		updatedSession, err = m.sessions.AddAssistantMessage(sessionID, response)
+	} else {
+		updatedSession, err = m.sessions.AddExchange(sessionID, message, response)
+	}
+	if err != nil {
+		return nil, err
+	}
+	if _, err := m.sessions.SetPresence(sessionID, "idle", false); err == nil {
+		m.appendEvent("session.presence", sessionID, map[string]any{"presence": "idle", "source": source})
+	}
+	if len(activities) > 0 {
+		m.RecordToolActivities(updatedSession, activities)
+	}
+	m.appendEvent("chat.completed", sessionID, map[string]any{"message": message, "response_length": len(response), "source": source})
+	return updatedSession, nil
+}
+
+func execResultToolActivities(execResult *appruntime.ExecutionResult) []agent.ToolActivity {
+	if execResult == nil {
+		return nil
+	}
+	return execResult.ToolActivities
+}
+
 func (m *Manager) updateSessionApprovalPresence(sessionID string, toolName string) {
 	m.updateSessionPresence(sessionID, "waiting_approval", false)
 	m.appendEvent("session.presence", sessionID, map[string]any{
@@ -709,6 +843,11 @@ func (m *Manager) failRun(sessionID string, message string, source string, resum
 	if !resume {
 		if pendingSession, err := m.sessions.EnsurePendingUserMessage(sessionID, message); err == nil {
 			persistedSession = pendingSession
+		}
+	}
+	if runErr != nil {
+		if failedMessageSession, err := m.sessions.AddAssistantMessage(sessionID, agent.FailureAssistantMessage(runErr)); err == nil {
+			persistedSession = failedMessageSession
 		}
 	}
 	if failedSession, err := m.sessions.FailTurn(sessionID); err == nil {
@@ -1031,7 +1170,7 @@ type desktopWindowSnapshot struct {
 	IsFocused   bool   `json:"is_focused,omitempty"`
 }
 
-func directDesktopOpenWindowAppeared(before []desktopWindowSnapshot, after []desktopWindowSnapshot) bool {
+func directDesktopOpenWindowAppeared(before []desktopWindowSnapshot, after []desktopWindowSnapshot, kind string) bool {
 	beforeByHandle := make(map[int]desktopWindowSnapshot, len(before))
 	for _, item := range before {
 		if item.Handle > 0 {
@@ -1039,7 +1178,7 @@ func directDesktopOpenWindowAppeared(before []desktopWindowSnapshot, after []des
 		}
 	}
 	for _, item := range after {
-		if !isBrowserWindowSnapshot(item) {
+		if !isRelevantDesktopOpenWindowSnapshot(item, kind) {
 			continue
 		}
 		if item.Handle > 0 {
@@ -1057,32 +1196,35 @@ func directDesktopOpenWindowAppeared(before []desktopWindowSnapshot, after []des
 	return false
 }
 
-func directDesktopOpenVerified(before []desktopWindowSnapshot, after []desktopWindowSnapshot) bool {
-	if directDesktopOpenWindowAppeared(before, after) {
+func directDesktopOpenVerified(before []desktopWindowSnapshot, after []desktopWindowSnapshot, kind string) bool {
+	if directDesktopOpenWindowAppeared(before, after, kind) {
 		return true
 	}
-	beforeHadBrowser := false
+	if !strings.EqualFold(strings.TrimSpace(kind), "url") {
+		return false
+	}
+	beforeHadRelevantWindow := false
 	for _, item := range before {
-		if isBrowserWindowSnapshot(item) {
-			beforeHadBrowser = true
+		if isRelevantDesktopOpenWindowSnapshot(item, kind) {
+			beforeHadRelevantWindow = true
 			break
 		}
 	}
-	if !beforeHadBrowser {
+	if !beforeHadRelevantWindow {
 		return false
 	}
 	for _, item := range after {
-		if isBrowserWindowSnapshot(item) {
+		if isRelevantDesktopOpenWindowSnapshot(item, kind) {
 			return true
 		}
 	}
 	return false
 }
 
-func directDesktopOpenWindowsSummary(windows []desktopWindowSnapshot) string {
+func directDesktopOpenWindowsSummary(windows []desktopWindowSnapshot, kind string) string {
 	items := make([]string, 0, len(windows))
 	for _, item := range windows {
-		if !isBrowserWindowSnapshot(item) {
+		if !isRelevantDesktopOpenWindowSnapshot(item, kind) {
 			continue
 		}
 		descriptor := firstNonEmpty(strings.TrimSpace(item.Title), strings.TrimSpace(item.ProcessName), fmt.Sprintf("window-%d", item.Handle))
@@ -1098,6 +1240,13 @@ func directDesktopOpenWindowsSummary(windows []desktopWindowSnapshot) string {
 		return ""
 	}
 	return strings.Join(items, ", ")
+}
+
+func isRelevantDesktopOpenWindowSnapshot(item desktopWindowSnapshot, kind string) bool {
+	if strings.EqualFold(strings.TrimSpace(kind), "url") {
+		return isBrowserWindowSnapshot(item)
+	}
+	return strings.TrimSpace(item.Title) != "" || item.Handle > 0 || strings.TrimSpace(item.ProcessName) != ""
 }
 
 func isBrowserWindowSnapshot(item desktopWindowSnapshot) bool {
@@ -1154,25 +1303,283 @@ func channelTransportMeta(meta map[string]string) map[string]string {
 	return transportMeta
 }
 
-func directDesktopOpenTarget(message string) (string, string, bool) {
+type directDesktopOpenRequest struct {
+	Target  string
+	Kind    string
+	Browser string
+}
+
+func directDesktopOpenTarget(message string, workingDir string) (directDesktopOpenRequest, bool) {
 	msg := strings.TrimSpace(message)
 	if msg == "" {
-		return "", "", false
+		return directDesktopOpenRequest{}, false
 	}
 	lower := strings.ToLower(msg)
 	hasOpenIntent := strings.Contains(lower, "open") || strings.Contains(lower, "visit") || strings.Contains(msg, "打开") || strings.Contains(msg, "访问")
 	if !hasOpenIntent {
-		return "", "", false
+		return directDesktopOpenRequest{}, false
 	}
 	browser := ""
 	if strings.Contains(lower, "edge") || strings.Contains(lower, "msedge") {
 		browser = "edge"
 	}
-	for _, field := range strings.Fields(msg) {
-		trimmed := strings.Trim(field, " \t\r\n,，。！？；:?)（）[]【】>\"'")
-		if strings.HasPrefix(strings.ToLower(trimmed), "http://") || strings.HasPrefix(strings.ToLower(trimmed), "https://") {
-			return trimmed, browser, true
+	if target := directDesktopOpenExplicitTarget(msg); target != "" {
+		if isDirectDesktopOpenURL(target) {
+			return directDesktopOpenRequest{Target: target, Kind: "url", Browser: browser}, true
+		}
+		if targetURL := directDesktopOpenEmbeddedURL(target); targetURL != "" {
+			return directDesktopOpenRequest{Target: targetURL, Kind: "url", Browser: browser}, true
+		}
+		if isDirectDesktopOpenFileCandidate(target, workingDir) {
+			return directDesktopOpenRequest{Target: resolveDirectDesktopOpenFileTarget(target, workingDir), Kind: "file", Browser: browser}, true
+		}
+		if isDirectDesktopOpenAppCandidate(target) {
+			return directDesktopOpenRequest{Target: target, Kind: "app", Browser: browser}, true
 		}
 	}
-	return "", "", false
+	for _, candidate := range directDesktopOpenCandidates(msg) {
+		if isDirectDesktopOpenURL(candidate) {
+			return directDesktopOpenRequest{Target: candidate, Kind: "url", Browser: browser}, true
+		}
+		if isDirectDesktopOpenFileCandidate(candidate, workingDir) {
+			return directDesktopOpenRequest{Target: resolveDirectDesktopOpenFileTarget(candidate, workingDir), Kind: "file", Browser: browser}, true
+		}
+	}
+	if target := resolveDirectDesktopOpenGeneratedPageTarget(msg, workingDir); target != "" {
+		return directDesktopOpenRequest{Target: target, Kind: "file", Browser: browser}, true
+	}
+	if target := directDesktopOpenAppTarget(msg); target != "" {
+		return directDesktopOpenRequest{Target: target, Kind: "app", Browser: browser}, true
+	}
+	return directDesktopOpenRequest{}, false
+}
+
+func directDesktopOpenEmbeddedURL(value string) string {
+	for _, candidate := range directDesktopOpenCandidates(value) {
+		if isDirectDesktopOpenURL(candidate) {
+			return candidate
+		}
+	}
+	return ""
+}
+
+func resolveDirectDesktopOpenGeneratedPageTarget(message string, workingDir string) string {
+	if strings.TrimSpace(workingDir) == "" {
+		return ""
+	}
+	lower := strings.ToLower(strings.TrimSpace(message))
+	hasGeneratedPageReference := strings.Contains(lower, "generated page") ||
+		strings.Contains(lower, "generated webpage") ||
+		strings.Contains(lower, "page you generated") ||
+		strings.Contains(lower, "created page") ||
+		strings.Contains(lower, "created webpage") ||
+		strings.Contains(lower, "page you created") ||
+		strings.Contains(message, "生成的页面") ||
+		strings.Contains(message, "生成的网页") ||
+		strings.Contains(message, "你生成的页面") ||
+		strings.Contains(message, "刚生成的页面") ||
+		strings.Contains(message, "创建的页面") ||
+		strings.Contains(message, "创建的网页") ||
+		strings.Contains(message, "你创建的页面") ||
+		strings.Contains(message, "刚创建的页面") ||
+		strings.Contains(message, "本地页面") ||
+		strings.Contains(message, "本地网页") ||
+		strings.Contains(message, "网页文件") ||
+		strings.Contains(message, "预览页面")
+	if !hasGeneratedPageReference {
+		return ""
+	}
+	matches, err := filepath.Glob(filepath.Join(workingDir, "*.htm*"))
+	if err != nil || len(matches) == 0 {
+		return ""
+	}
+	type candidate struct {
+		name    string
+		modTime time.Time
+	}
+	candidates := make([]candidate, 0, len(matches))
+	for _, path := range matches {
+		info, err := os.Stat(path)
+		if err != nil || info.IsDir() {
+			continue
+		}
+		candidates = append(candidates, candidate{name: filepath.Base(path), modTime: info.ModTime()})
+	}
+	if len(candidates) == 0 {
+		return ""
+	}
+	sort.SliceStable(candidates, func(i int, j int) bool {
+		return candidates[i].modTime.After(candidates[j].modTime)
+	})
+	return candidates[0].name
+}
+
+func directDesktopOpenExplicitTarget(message string) string {
+	trimmedMessage := strings.TrimSpace(message)
+	lower := strings.ToLower(trimmedMessage)
+	for _, phrase := range []string{"open ", "launch ", "start ", "visit ", "打开", "启动", "访问"} {
+		idx := strings.Index(lower, phrase)
+		if idx < 0 {
+			continue
+		}
+		start := idx + len(phrase)
+		if phrase == "打开" || phrase == "启动" || phrase == "访问" {
+			start = strings.Index(trimmedMessage, phrase) + len(phrase)
+		}
+		target := strings.TrimSpace(trimmedMessage[start:])
+		for _, prefix := range []string{"帮我", "请", "帮忙", "给我"} {
+			target = strings.TrimPrefix(target, prefix)
+			target = strings.TrimSpace(target)
+		}
+		target = strings.TrimPrefix(target, "一下")
+		target = strings.TrimPrefix(target, "这个")
+		target = strings.TrimSpace(target)
+		target = strings.Trim(target, " \t\r\n,，。！？；:?)（）[]【】>\"'")
+		return target
+	}
+	return ""
+}
+
+func directDesktopOpenCandidates(message string) []string {
+	fields := strings.Fields(message)
+	candidates := make([]string, 0, len(fields))
+	for _, field := range fields {
+		trimmed := strings.Trim(field, " \t\r\n,，。！？；:?)（）[]【】>\"'")
+		if trimmed != "" {
+			candidates = append(candidates, trimmed)
+		}
+	}
+	return candidates
+}
+
+func isDirectDesktopOpenURL(value string) bool {
+	lower := strings.ToLower(strings.TrimSpace(value))
+	return strings.HasPrefix(lower, "http://") || strings.HasPrefix(lower, "https://")
+}
+
+func isDirectDesktopOpenFileCandidate(value string, workingDir string) bool {
+	value = strings.TrimSpace(value)
+	if value == "" || isDirectDesktopOpenURL(value) {
+		return false
+	}
+	if isInvalidDirectDesktopOpenTarget(value) {
+		return false
+	}
+	if strings.ContainsAny(value, `/\`) {
+		return true
+	}
+	ext := strings.ToLower(filepath.Ext(value))
+	if ext == "" {
+		return resolveDirectDesktopOpenFileTarget(value, workingDir) != value
+	}
+	for _, known := range []string{
+		".html", ".htm", ".pdf", ".txt", ".md", ".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg",
+		".css", ".js", ".json", ".csv", ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx",
+	} {
+		if ext == known {
+			return true
+		}
+	}
+	resolved := value
+	if strings.TrimSpace(workingDir) != "" && !filepath.IsAbs(value) {
+		resolved = filepath.Join(workingDir, value)
+	}
+	return filepath.Ext(resolved) != ""
+}
+
+func isInvalidDirectDesktopOpenTarget(value string) bool {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return true
+	}
+	onlySeparators := true
+	for _, r := range value {
+		if r != '\\' && r != '/' {
+			onlySeparators = false
+			break
+		}
+	}
+	if onlySeparators {
+		return true
+	}
+	cleaned := filepath.Clean(value)
+	return cleaned == "." || cleaned == string(filepath.Separator)
+}
+
+func resolveDirectDesktopOpenFileTarget(value string, workingDir string) string {
+	value = strings.TrimSpace(value)
+	if value == "" || filepath.Ext(value) != "" || strings.TrimSpace(workingDir) == "" {
+		return value
+	}
+	for _, ext := range []string{".html", ".htm", ".pdf", ".txt", ".md", ".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg"} {
+		candidate := filepath.Join(workingDir, value+ext)
+		if info, err := os.Stat(candidate); err == nil && !info.IsDir() {
+			return value + ext
+		}
+	}
+	return value
+}
+
+func directDesktopOpenAppTarget(message string) string {
+	target := directDesktopOpenExplicitTarget(message)
+	if isDirectDesktopOpenAppCandidate(target) {
+		return target
+	}
+	return ""
+}
+
+func isDirectDesktopOpenAppCandidate(value string) bool {
+	value = strings.TrimSpace(value)
+	if value == "" || strings.Contains(value, " ") || isDirectDesktopOpenURL(value) || isDirectDesktopOpenFileCandidate(value, "") {
+		return false
+	}
+	lower := strings.ToLower(value)
+	for _, candidate := range []string{
+		"notepad", "calc", "calculator", "mspaint", "paint", "cmd", "powershell", "pwsh",
+		"edge", "msedge", "chrome", "firefox", "code", "vscode", "steam",
+	} {
+		if lower == candidate || lower == candidate+".exe" {
+			return true
+		}
+	}
+	return strings.HasSuffix(lower, ".exe")
+}
+
+func directDesktopOpenResponse(request directDesktopOpenRequest, verified bool, verificationErr error) string {
+	target := strings.TrimSpace(request.Target)
+	kindLabel := directDesktopOpenKindLabel(request.Kind)
+	if verified {
+		return fmt.Sprintf("已处理：\n- 已打开%s %s。\n\n已验证：\n- 已确认桌面窗口出现。\n\n未确认/阻塞：\n- 无", kindLabel, target)
+	}
+	reason := "桌面窗口验证超时或未返回匹配窗口。"
+	if verificationErr != nil && strings.TrimSpace(verificationErr.Error()) != "" {
+		reason = verificationErr.Error()
+	}
+	return fmt.Sprintf("已处理：\n- 已请求打开%s %s。\n\n已验证：\n- 未能确认桌面窗口已出现。\n\n未确认/阻塞：\n- %s", kindLabel, target, reason)
+}
+
+func directDesktopOpenKindLabel(kind string) string {
+	switch strings.ToLower(strings.TrimSpace(kind)) {
+	case "url":
+		return "网页"
+	case "file":
+		return "文件"
+	case "app":
+		return "应用"
+	default:
+		return "目标"
+	}
+}
+
+func runtimeWorkingDir(runtime *appruntime.MainRuntime) string {
+	if runtime == nil {
+		return ""
+	}
+	if strings.TrimSpace(runtime.WorkingDir) != "" {
+		return strings.TrimSpace(runtime.WorkingDir)
+	}
+	if runtime.Config != nil {
+		return sessionPermissionWorkingDir(runtime.Config)
+	}
+	return ""
 }

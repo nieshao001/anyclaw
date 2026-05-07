@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"reflect"
 	"strings"
@@ -109,13 +110,6 @@ func (r *contextRuntime) startBootstrapWatcher(workingDir string, interval time.
 func bootstrapWatcherFiles() []bootstrapwatch.FileType {
 	return []bootstrapwatch.FileType{
 		bootstrapwatch.FileAgents,
-		bootstrapwatch.FileSoul,
-		bootstrapwatch.FileTools,
-		bootstrapwatch.FileIdentity,
-		bootstrapwatch.FileUser,
-		bootstrapwatch.FileHeartbeat,
-		bootstrapwatch.FileBootstrap,
-		bootstrapwatch.FileMemory,
 	}
 }
 
@@ -279,7 +273,7 @@ func (r *contextRuntime) compactHistory(ctx context.Context, history []prompt.Me
 	return toPromptMessages(compactor.Messages()), nil
 }
 
-func (r *contextRuntime) enforceTokenLimit(systemPrompt string, history []prompt.Message) ([]prompt.Message, error) {
+func (r *contextRuntime) enforceTokenLimit(systemPrompt string, history []prompt.Message, toolDefs []llm.ToolDefinition) ([]prompt.Message, error) {
 	if r == nil {
 		return history, nil
 	}
@@ -293,6 +287,11 @@ func (r *contextRuntime) enforceTokenLimit(systemPrompt string, history []prompt
 	systemTokens := r.estimator(systemPrompt)
 	if err := guard.Add(systemTokens); err != nil {
 		return nil, fmt.Errorf("context window exceeded by system prompt: %w", err)
+	}
+	if toolTokens := r.toolDefinitionTokens(toolDefs); toolTokens > 0 {
+		if err := guard.Add(toolTokens); err != nil {
+			return nil, fmt.Errorf("context window exceeded by selected tool definitions: %w", err)
+		}
 	}
 
 	selected := make([]prompt.Message, 0, len(history))
@@ -331,6 +330,66 @@ func (r *contextRuntime) enforceTokenLimit(systemPrompt string, history []prompt
 	}
 
 	return append(selectedSystem, selected...), nil
+}
+
+func (r *contextRuntime) limitToolDefinitions(defs []llm.ToolDefinition) []llm.ToolDefinition {
+	if r == nil {
+		return limitToolDefinitionsByBudget(defs, nil, codexSelectedToolDefinitionBudget)
+	}
+	budget := r.maxTokens - r.safetyMargin
+	if budget <= 0 {
+		budget = codexSelectedToolDefinitionBudget
+	}
+	toolBudget := budget / 5
+	if toolBudget < 600 {
+		toolBudget = 600
+	}
+	if toolBudget > codexSelectedToolDefinitionBudget {
+		toolBudget = codexSelectedToolDefinitionBudget
+	}
+	return limitToolDefinitionsByBudget(defs, r.estimator, toolBudget)
+}
+
+func (r *contextRuntime) toolDefinitionTokens(defs []llm.ToolDefinition) int {
+	if r == nil || len(defs) == 0 {
+		return 0
+	}
+	total := 0
+	for _, def := range defs {
+		total += estimateToolDefinitionTokens(def, r.estimator)
+	}
+	return total
+}
+
+func limitToolDefinitionsByBudget(defs []llm.ToolDefinition, estimator func(string) int, tokenBudget int) []llm.ToolDefinition {
+	if len(defs) == 0 {
+		return nil
+	}
+	if tokenBudget <= 0 {
+		tokenBudget = codexSelectedToolDefinitionBudget
+	}
+	selected := make([]llm.ToolDefinition, 0, len(defs))
+	used := 0
+	for _, def := range defs {
+		cost := estimateToolDefinitionTokens(def, estimator)
+		if len(selected) > 0 && used+cost > tokenBudget {
+			continue
+		}
+		selected = append(selected, def)
+		used += cost
+	}
+	return selected
+}
+
+func estimateToolDefinitionTokens(def llm.ToolDefinition, estimator func(string) int) int {
+	data, err := json.Marshal(def)
+	if err != nil {
+		return 16
+	}
+	if estimator != nil {
+		return estimator(string(data)) + 8
+	}
+	return len(data)/4 + 8
 }
 
 func (r *contextRuntime) messageTokens(msg prompt.Message) int {

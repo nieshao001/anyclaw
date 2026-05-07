@@ -50,6 +50,7 @@ type DangerousCommandConfirmer func(command string) bool
 type BuiltinOptions struct {
 	WorkingDir              string
 	PermissionLevel         string
+	Permissions             PermissionOptions
 	ExecutionMode           string
 	DangerousPatterns       []string
 	ProtectedPaths          []string
@@ -57,6 +58,7 @@ type BuiltinOptions struct {
 	AllowedWritePaths       []string
 	AllowedEgressDomains    []string
 	Policy                  *PolicyEngine
+	PermissionEngine        *PermissionEngine
 	CommandTimeoutSeconds   int
 	ConfirmDangerousCommand DangerousCommandConfirmer
 	AuditLogger             AuditLogger
@@ -64,6 +66,7 @@ type BuiltinOptions struct {
 	Computer                ComputerOptions
 	ComputerController      ComputerController
 	MemoryBackend           MemoryBackend
+	DailyMemoryDir          string
 	QMDClient               QMDClient
 	LLMClient               llm.Client
 }

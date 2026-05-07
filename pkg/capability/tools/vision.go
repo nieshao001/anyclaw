@@ -1114,7 +1114,7 @@ func ImageAnalyzeTool(ctx context.Context, input map[string]any, opts BuiltinOpt
 	var err error
 
 	if strings.TrimSpace(path) != "" {
-		imageData, mimeType, path, err = readLocalImageForAnalyze(strings.TrimSpace(path), opts)
+		imageData, mimeType, path, err = readLocalImageForAnalyze(ctx, strings.TrimSpace(path), opts)
 		if err != nil {
 			return "", err
 		}
@@ -1157,14 +1157,22 @@ func ImageAnalyzeTool(ctx context.Context, input map[string]any, opts BuiltinOpt
 	return string(payload), nil
 }
 
-func readLocalImageForAnalyze(path string, opts BuiltinOptions) ([]byte, string, string, error) {
+func readLocalImageForAnalyze(ctx context.Context, path string, opts BuiltinOptions) ([]byte, string, string, error) {
 	resolved := resolvePath(path, opts.WorkingDir)
 	if opts.Policy != nil {
-		if err := opts.Policy.CheckReadPath(resolved); err != nil {
+		action := PermissionAction{Kind: "read", ToolName: "image_analyze", Path: resolved}
+		if HasPermissionActionGrant(ctx, action) {
+			// granted by the active approval flow
+		} else if err := opts.Policy.CheckReadPath(resolved); err != nil {
 			return nil, "", "", err
 		}
-	} else if err := validateProtectedPath(resolved, opts.ProtectedPaths); err != nil {
+	} else if err := CheckPermission(ctx, opts, PermissionAction{Kind: "read", ToolName: "image_analyze", Path: resolved}); err != nil {
 		return nil, "", "", err
+	}
+	if opts.Policy == nil {
+		if err := validateProtectedPath(resolved, opts.ProtectedPaths); err != nil {
+			return nil, "", "", err
+		}
 	}
 
 	file, err := os.Open(resolved)
@@ -1186,9 +1194,14 @@ func readLocalImageForAnalyze(path string, opts BuiltinOptions) ([]byte, string,
 
 func fetchImageForAnalyze(ctx context.Context, imageURL string, opts BuiltinOptions) ([]byte, string, error) {
 	if opts.Policy != nil {
-		if err := opts.Policy.CheckEgressURL(imageURL); err != nil {
+		action := PermissionAction{Kind: "network", ToolName: "image_analyze", URL: imageURL}
+		if HasPermissionActionGrant(ctx, action) {
+			// granted by the active approval flow
+		} else if err := opts.Policy.CheckEgressURL(imageURL); err != nil {
 			return nil, "", err
 		}
+	} else if err := CheckPermission(ctx, opts, PermissionAction{Kind: "network", ToolName: "image_analyze", URL: imageURL}); err != nil {
+		return nil, "", err
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, imageURL, nil)
 	if err != nil {

@@ -491,16 +491,16 @@ func TestEnsureDesktopAllowedRequiresHostReviewed(t *testing.T) {
 
 func TestMemoryToolsSearchAndGetDailyFiles(t *testing.T) {
 	workspace := t.TempDir()
-	memoryDir := filepath.Join(workspace, "memory")
-	if err := os.MkdirAll(memoryDir, 0o755); err != nil {
+	runtimeDailyDir := filepath.Join(t.TempDir(), "runtime-memory", "daily")
+	if err := os.MkdirAll(runtimeDailyDir, 0o755); err != nil {
 		t.Fatalf("MkdirAll: %v", err)
 	}
-	if err := os.WriteFile(filepath.Join(memoryDir, "2026-03-29.md"), []byte("# Daily Memory 2026-03-29\n\nRelease checklist completed."), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(runtimeDailyDir, "2026-03-29.md"), []byte("# Daily Memory 2026-03-29\n\nRelease checklist completed."), 0o644); err != nil {
 		t.Fatalf("WriteFile: %v", err)
 	}
 
 	registry := NewRegistry()
-	RegisterBuiltins(registry, BuiltinOptions{WorkingDir: workspace})
+	RegisterBuiltins(registry, BuiltinOptions{WorkingDir: workspace, DailyMemoryDir: runtimeDailyDir})
 
 	searchResult, err := registry.Call(context.Background(), "memory_search", map[string]any{"query": "checklist"})
 	if err != nil {
@@ -516,5 +516,27 @@ func TestMemoryToolsSearchAndGetDailyFiles(t *testing.T) {
 	}
 	if !strings.Contains(getResult, "Release checklist completed.") {
 		t.Fatalf("expected memory_get output, got %q", getResult)
+	}
+}
+
+func TestMemoryToolsIgnoreLegacyWorkspaceMemoryDirectory(t *testing.T) {
+	workspace := t.TempDir()
+	legacyDir := filepath.Join(workspace, "memory")
+	if err := os.MkdirAll(legacyDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll legacy memory: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(legacyDir, "2026-03-29.md"), []byte("# Daily Memory 2026-03-29\n\nLegacy workspace memory."), 0o644); err != nil {
+		t.Fatalf("WriteFile legacy memory: %v", err)
+	}
+
+	registry := NewRegistry()
+	RegisterBuiltins(registry, BuiltinOptions{WorkingDir: workspace})
+
+	searchResult, err := registry.Call(context.Background(), "memory_search", map[string]any{"query": "Legacy workspace"})
+	if err != nil {
+		t.Fatalf("memory_search: %v", err)
+	}
+	if strings.Contains(searchResult, "Legacy workspace memory") || strings.Contains(searchResult, "2026-03-29") {
+		t.Fatalf("expected legacy workspace memory to be ignored, got %q", searchResult)
 	}
 }

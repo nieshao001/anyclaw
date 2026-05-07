@@ -38,6 +38,7 @@ const HostReviewedCapabilityDesktop = "desktop"
 type approvalGrantScope struct {
 	mu               sync.RWMutex
 	hostReviewedCaps map[string]struct{}
+	permissionGrants map[string]struct{}
 }
 
 func WithToolApprovalHook(ctx context.Context, hook ToolApprovalHook) context.Context {
@@ -73,6 +74,7 @@ func WithApprovalGrantScope(ctx context.Context) context.Context {
 	}
 	return context.WithValue(ctx, approvalGrantScopeKey{}, &approvalGrantScope{
 		hostReviewedCaps: map[string]struct{}{},
+		permissionGrants: map[string]struct{}{},
 	})
 }
 
@@ -105,6 +107,35 @@ func HasHostReviewedCapability(ctx context.Context, capability string) bool {
 	return ok
 }
 
+func GrantPermissionAction(ctx context.Context, action PermissionAction) {
+	scope := approvalGrantScopeFromContext(ctx)
+	if scope == nil {
+		return
+	}
+	key := permissionGrantKey(action)
+	if key == "" {
+		return
+	}
+	scope.mu.Lock()
+	defer scope.mu.Unlock()
+	scope.permissionGrants[key] = struct{}{}
+}
+
+func HasPermissionActionGrant(ctx context.Context, action PermissionAction) bool {
+	scope := approvalGrantScopeFromContext(ctx)
+	if scope == nil {
+		return false
+	}
+	key := permissionGrantKey(action)
+	if key == "" {
+		return false
+	}
+	scope.mu.RLock()
+	defer scope.mu.RUnlock()
+	_, ok := scope.permissionGrants[key]
+	return ok
+}
+
 func approvalGrantScopeFromContext(ctx context.Context) *approvalGrantScope {
 	if ctx == nil {
 		return nil
@@ -119,6 +150,27 @@ func toolApprovalCapability(name string) string {
 		return HostReviewedCapabilityDesktop
 	}
 	return ""
+}
+
+func permissionGrantKey(action PermissionAction) string {
+	kind := strings.TrimSpace(strings.ToLower(action.Kind))
+	if kind == "" {
+		return ""
+	}
+	parts := []string{kind}
+	switch kind {
+	case "desktop":
+		parts = append(parts, HostReviewedCapabilityDesktop)
+	case "read", "write", "delete":
+		parts = append(parts, normalizePolicyPath(permissionArtifactPath(action.Path, "")))
+	case "execute":
+		parts = append(parts, normalizePolicyPath(permissionArtifactPath(action.CWD, "")), strings.TrimSpace(action.Command))
+	case "network":
+		parts = append(parts, strings.TrimSpace(strings.ToLower(action.URL)))
+	default:
+		parts = append(parts, strings.TrimSpace(action.ToolName), strings.TrimSpace(action.Reason))
+	}
+	return strings.Join(parts, "|")
 }
 
 func WithToolCaller(ctx context.Context, caller ToolCaller) context.Context {

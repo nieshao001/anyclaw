@@ -186,8 +186,10 @@ func derivedSessionKey(request MainRouteRequest) string {
 		request.DeliveryHint.ReplyTo,
 		request.Scope.ConversationID,
 		request.DeliveryHint.ConversationID,
-		request.Actor.UserID,
 	))
+	if conversationID == "" && !strings.EqualFold(strings.TrimSpace(request.Scope.EntryPoint), "chat") {
+		conversationID = strings.TrimSpace(request.Actor.UserID)
+	}
 	if conversationID == "" {
 		return ""
 	}

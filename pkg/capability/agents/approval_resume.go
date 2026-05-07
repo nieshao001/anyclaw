@@ -10,11 +10,10 @@ import (
 )
 
 type ApprovalResumeState struct {
-	Messages         []llm.Message `json:"messages,omitempty"`
-	AssistantMessage llm.Message   `json:"assistant_message"`
-	ToolMessages     []llm.Message `json:"tool_messages,omitempty"`
-	Results          []string      `json:"results,omitempty"`
-	PendingTool      ToolCall      `json:"pending_tool"`
+	Messages         []llm.Message     `json:"messages,omitempty"`
+	AssistantMessage llm.Message       `json:"assistant_message"`
+	Observations     []ToolObservation `json:"observations,omitempty"`
+	PendingTool      ToolCall          `json:"pending_tool"`
 }
 
 type ApprovalPauseError struct {
@@ -49,69 +48,63 @@ func (a *Agent) ResumeAfterApproval(ctx context.Context, resume ApprovalResumeSt
 
 	a.resetToolActivities()
 
-	messages := cloneLLMMessages(resume.Messages)
-	assistantMessage := cloneLLMMessage(resume.AssistantMessage)
+	messages := compactCodexLoopMessages(resume.Messages)
+	assistantMessage := compactCodexLoopMessage(resume.AssistantMessage)
 	if strings.TrimSpace(assistantMessage.Role) == "" {
 		assistantMessage.Role = "assistant"
 	}
 	messages = append(messages, assistantMessage)
-	if len(resume.ToolMessages) > 0 {
-		messages = append(messages, cloneLLMMessages(resume.ToolMessages)...)
+
+	observations := cloneToolObservations(resume.Observations)
+	for _, obs := range observations {
+		tc := ToolCall{ID: obs.ToolCallID, Name: obs.Tool}
+		messages = append(messages, toolObservationMessage(tc, obs))
 	}
 
-	results := append([]string(nil), resume.Results...)
 	pendingTool := cloneToolCall(resume.PendingTool)
+	observation, activity := a.executeToolObservation(ctx, pendingTool)
+	a.recordToolActivity(activity)
+	observations = append(observations, observation)
+	messages = append(messages, toolObservationMessage(pendingTool, observation))
+	messages = append(messages, llm.Message{Role: "user", Content: a.toolContinuationPrompt(observations)})
+	toolDefs := a.buildSelectedToolDefinitions(a.selectToolInfos(a.latestUserInput()))
 
-	if result, err := a.executeTool(ctx, pendingTool); err != nil {
-		results = append(results, fmt.Sprintf("[%s] Error: %v", pendingTool.Name, err))
-		a.recordToolActivity(ToolActivity{ToolName: pendingTool.Name, Args: pendingTool.Args, Error: err.Error()})
-		messages = append(messages, llm.Message{
-			Role:       "tool",
-			ToolCallID: pendingTool.ID,
-			Name:       pendingTool.Name,
-			Content:    fmt.Sprintf("error: %v", err),
-		})
-	} else {
-		results = append(results, fmt.Sprintf("[%s] %s", pendingTool.Name, result))
-		a.recordToolActivity(ToolActivity{ToolName: pendingTool.Name, Args: pendingTool.Args, Result: result})
-		messages = append(messages, llm.Message{
-			Role:       "tool",
-			ToolCallID: pendingTool.ID,
-			Name:       pendingTool.Name,
-			Content:    result,
-		})
-	}
-
-	messages = append(messages, llm.Message{Role: "user", Content: a.toolContinuationPrompt(results)})
-	toolDefs := buildToolDefinitionsFromInfos(a.selectToolInfos(a.latestUserInput()))
-
-	response, err := a.chatWithTools(ctx, messages, toolDefs)
+	response, err := NewCodexChain(a).Run(ctx, CodexChainRequest{
+		Messages: messages,
+		Tools:    toolDefs,
+	})
 	if err != nil {
 		return "", err
 	}
 
 	a.appendHistoryMessage(ctx, "assistant", response)
-	userInput := a.latestUserInput()
-	a.recordConversation(userInput, response)
-
-	if a.preferenceLearner != nil {
-		if prefResponse, learned := a.preferenceLearner.Learn(userInput, response); learned {
-			response = prefResponse + "\n\n" + response
-		}
-	}
 
 	return response, nil
 }
 
-func cloneLLMMessages(messages []llm.Message) []llm.Message {
-	if len(messages) == 0 {
+func cloneToolObservations(items []ToolObservation) []ToolObservation {
+	if len(items) == 0 {
 		return nil
 	}
-	cloned := make([]llm.Message, 0, len(messages))
-	for _, message := range messages {
-		cloned = append(cloned, cloneLLMMessage(message))
+	cloned := make([]ToolObservation, 0, len(items))
+	for _, item := range items {
+		cloned = append(cloned, compactToolObservation(item, true))
 	}
 	return cloned
+}
+
+func limitToolObservations(items []ToolObservation, limit int) []ToolObservation {
+	if limit <= 0 || len(items) <= limit {
+		return append([]ToolObservation(nil), items...)
+	}
+	result := append([]ToolObservation(nil), items[:limit]...)
+	result = append(result, ToolObservation{
+		Type:    codexObservationType,
+		Tool:    "loop",
+		OK:      true,
+		Summary: fmt.Sprintf("...and %d more observation(s)", len(items)-limit),
+	})
+	return result
 }
 
 func cloneLLMMessage(message llm.Message) llm.Message {

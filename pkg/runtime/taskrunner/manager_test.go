@@ -252,7 +252,26 @@ func TestAwaitApprovalsIfNeededResumesApprovedExecution(t *testing.T) {
 	}
 }
 
-func TestRequireToolApprovalHandlesDangerousAndSafeTools(t *testing.T) {
+func TestRequirePermissionApprovalHandlesPolicyAndExplicitTools(t *testing.T) {
+	t.Run("allows policy-approved workspace command", func(t *testing.T) {
+		manager, _, sessions := newTaskManagerTest(t, nil)
+		task, err := manager.Create(CreateOptions{Input: "run a command"})
+		if err != nil {
+			t.Fatalf("Create: %v", err)
+		}
+		session, err := sessions.Create("Task session", "main-agent", "org-1", "project-1", "workspace-1")
+		if err != nil {
+			t.Fatalf("Create session: %v", err)
+		}
+		cfg := dangerousConfig()
+		args := map[string]any{"command": "echo hi"}
+		action, decision := taskPermissionDecision(cfg, "run_command", args)
+
+		if err := manager.requirePermissionApproval(task, session, cfg, "run_command", args, action, decision); err != nil {
+			t.Fatalf("expected policy-approved command to proceed, got %v", err)
+		}
+	})
+
 	t.Run("requests approval for dangerous tool", func(t *testing.T) {
 		manager, store, sessions := newTaskManagerTest(t, nil)
 		task, err := manager.Create(CreateOptions{Input: "run a command"})
@@ -265,7 +284,9 @@ func TestRequireToolApprovalHandlesDangerousAndSafeTools(t *testing.T) {
 		}
 
 		args := map[string]any{"command": "rm -rf /tmp/demo"}
-		err = manager.requireToolApproval(task, session, dangerousConfig(), "run_command", args)
+		cfg := dangerousConfig()
+		action, decision := taskPermissionDecision(cfg, "run_command", args)
+		err = manager.requirePermissionApproval(task, session, cfg, "run_command", args, action, decision)
 		if err != ErrTaskWaitingApproval {
 			t.Fatalf("expected ErrTaskWaitingApproval, got %v", err)
 		}

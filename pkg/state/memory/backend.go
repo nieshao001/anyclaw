@@ -1,6 +1,9 @@
 package memory
 
 import (
+	"path/filepath"
+	"regexp"
+	"strings"
 	"time"
 )
 
@@ -82,7 +85,7 @@ const (
 
 func DefaultConfig(workDir string) Config {
 	return Config{
-		Backend:     BackendDual,
+		Backend:     BackendSQLite,
 		DSN:         workDir + "/memory.db",
 		WorkDir:     workDir,
 		MaxOpen:     1,
@@ -103,4 +106,40 @@ func DefaultConfig(workDir string) Config {
 			},
 		},
 	}
+}
+
+func CodexDailyMemoryDir(workspaceDir string) string {
+	return filepath.Join(CodexMemoryWorkspaceDir(".", workspaceDir), "daily")
+}
+
+func CodexMemoryWorkspaceDir(workDir string, workspaceDir string) string {
+	workDir = strings.TrimSpace(workDir)
+	if workDir == "" {
+		workDir = "."
+	}
+	return filepath.Join(workDir, "memory", "workspaces", sanitizeMemoryWorkspaceName(workspaceDir))
+}
+
+func CodexMemoryWorkspaceName(workspaceDir string) string {
+	return sanitizeMemoryWorkspaceName(workspaceDir)
+}
+
+func sanitizeMemoryWorkspaceName(input string) string {
+	input = strings.TrimSpace(strings.ToLower(filepath.Clean(input)))
+	if input == "" || input == "." {
+		return "default"
+	}
+	re := regexp.MustCompile(`[^a-z0-9._-]+`)
+	clean := re.ReplaceAllString(input, "-")
+	clean = strings.Trim(clean, "-.")
+	if clean == "" {
+		return "default"
+	}
+	if len(clean) > 80 {
+		clean = strings.Trim(clean[:80], "-.")
+	}
+	if clean == "" {
+		return "default"
+	}
+	return clean
 }
