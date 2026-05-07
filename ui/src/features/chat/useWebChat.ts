@@ -745,6 +745,21 @@ function mapSessionMessages(session: GatewaySession | undefined, fallbackAgentNa
     }));
 }
 
+function latestMessageTime(messages: ChatMessage[]) {
+  return messages.map((message) => getTimeValue(message.timestamp)).reduce((latest, value) => Math.max(latest, value), 0);
+}
+
+function selectTerminalReferenceMessages(
+  session: GatewaySession | null | undefined,
+  fallbackAgentName: string | null,
+  fallbackMessages: ChatMessage[],
+) {
+  const mappedMessages = mapSessionMessages(session ?? undefined, fallbackAgentName);
+  if (mappedMessages.length === 0) return fallbackMessages;
+  if (fallbackMessages.length === 0) return mappedMessages;
+  return latestMessageTime(fallbackMessages) > latestMessageTime(mappedMessages) ? fallbackMessages : mappedMessages;
+}
+
 function sessionBelongsToWorkspace(session: StoredChatSession, workspaceId: string | null) {
   const normalizedWorkspaceId = normalizeWorkspaceId(workspaceId);
   if (!normalizedWorkspaceId) return true;
@@ -1181,9 +1196,7 @@ function shouldSurfaceChatFailure(event: GatewayEvent, messages: ChatMessage[]) 
   const failureTime = eventTimeValue(event);
   if (failureTime <= 0) return true;
 
-  const lastMessageTime = messages
-    .map((message) => getTimeValue(message.timestamp))
-    .reduce((latest, value) => Math.max(latest, value), 0);
+  const lastMessageTime = latestMessageTime(messages);
 
   return lastMessageTime <= failureTime;
 }
@@ -1538,6 +1551,7 @@ export function useWebChat(agentName: string | null, workspacePath: string | nul
     }
 
     const session = options?.skipSession ? null : await fetchSessionSnapshot(activeSessionId);
+    const terminalReferenceMessages = selectTerminalReferenceMessages(session, agentName, latestMessagesRef.current);
     if (session) {
       applySessionSnapshot(session);
     }
@@ -1545,7 +1559,7 @@ export function useWebChat(agentName: string | null, workspacePath: string | nul
     const allApprovals = await fetchAllPendingApprovals();
     const approvals = filterSessionApprovals(allApprovals, session?.id ?? activeSessionId);
     applyApprovalSnapshot(allApprovals, session?.id ?? activeSessionId);
-    await syncLatestChatTerminalEvent(activeSessionId, session ? mapSessionMessages(session, agentName) : messages);
+    await syncLatestChatTerminalEvent(activeSessionId, terminalReferenceMessages);
 
     return { approvals, session };
   }
@@ -1604,6 +1618,7 @@ export function useWebChat(agentName: string | null, workspacePath: string | nul
 
       try {
         const session = await fetchSessionSnapshot(activeSessionId);
+        const terminalReferenceMessages = selectTerminalReferenceMessages(session, agentName, latestMessagesRef.current);
         applySessionSnapshot(session);
 
         const allApprovals = await fetchAllPendingApprovals();
@@ -1615,7 +1630,7 @@ export function useWebChat(agentName: string | null, workspacePath: string | nul
         const typing = Boolean(session?.typing);
 
         if (approvals.length > 0) return;
-        if (await syncLatestChatTerminalEvent(activeSessionId, mapSessionMessages(session ?? undefined, agentName))) return;
+        if (await syncLatestChatTerminalEvent(activeSessionId, terminalReferenceMessages)) return;
         if (messageCount > baselineMessageCount && !waitingApproval && !typing) return;
         if (!waitingApproval && !typing) {
           idleStreak += 1;
@@ -1741,16 +1756,14 @@ export function useWebChat(agentName: string | null, workspacePath: string | nul
         const session = await fetchSessionSnapshot(sessionId);
         if (cancelled) return;
 
+        const terminalReferenceMessages = selectTerminalReferenceMessages(session, agentName, latestMessagesRef.current);
         applySessionSnapshot(session);
 
         const allApprovals = await fetchAllPendingApprovals();
         if (cancelled) return;
 
         applyApprovalSnapshot(allApprovals, session?.id ?? sessionId);
-        await syncLatestChatTerminalEvent(
-          session?.id ?? sessionId,
-          mapSessionMessages(session ?? undefined, agentName) || latestMessagesRef.current,
-        );
+        await syncLatestChatTerminalEvent(session?.id ?? sessionId, terminalReferenceMessages);
       } catch (syncError) {
         if (cancelled) return;
         if (getErrorMessage(syncError).includes("session not found")) {

@@ -9,7 +9,7 @@
   },
   "agent": {
     "name": "AnyClaw",
-    "description": "Your AI assistant with file-based memory",
+    "description": "Your AI assistant with Codex-style runtime memory",
     "work_dir": ".anyclaw",
     "working_dir": "workflows/default",
     "permission_level": "limited",

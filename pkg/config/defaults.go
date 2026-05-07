@@ -23,7 +23,7 @@ func DefaultConfig() *Config {
 		},
 		Agent: AgentConfig{
 			Name:                            "AnyClaw",
-			Description:                     "Your AI assistant with file-based memory",
+			Description:                     "Your AI assistant with Codex-style runtime memory",
 			WorkDir:                         ".anyclaw",
 			WorkingDir:                      "workflows",
 			PermissionLevel:                 "limited",

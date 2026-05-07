@@ -1530,6 +1530,103 @@ describe("useWebChat persistence", () => {
     }, { timeout: 5000 });
   }, 10000);
 
+  it("ignores stale terminal events when the local transcript has a newer user turn", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = requestURL(input);
+
+      if (url.startsWith("/sessions?workspace=")) {
+        return jsonResponse([]);
+      }
+
+      if (url === "/approvals?status=pending") {
+        return jsonResponse([]);
+      }
+
+      if (url === "/sessions/sess_lagging_terminal_event") {
+        return jsonResponse({
+          agent: "binbin",
+          id: "sess_lagging_terminal_event",
+          messages: [
+            {
+              content: "please build a snake game",
+              created_at: "2026-04-11T12:50:00.000Z",
+              role: "user",
+            },
+          ],
+          presence: "idle",
+          typing: false,
+        });
+      }
+
+      if (url === "/events?limit=50") {
+        return jsonResponse([
+          {
+            id: "evt_completed_previous_turn",
+            payload: {
+              message: "please build a snake game",
+              response_length: 120,
+            },
+            session_id: "sess_lagging_terminal_event",
+            timestamp: "2026-04-11T12:50:20.000Z",
+            type: "chat.completed",
+          },
+        ]);
+      }
+
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    window.localStorage.setItem(
+      CHAT_STORAGE_KEY,
+      JSON.stringify({
+        selectedSessionKey: "sess_lagging_terminal_event",
+        sessions: [
+          {
+            agentName: "binbin",
+            createdAt: "2026-04-11T12:50:00.000Z",
+            key: "sess_lagging_terminal_event",
+            messages: [
+              {
+                content: "please build a snake game",
+                role: "user",
+                timestamp: "2026-04-11T12:50:00.000Z",
+              },
+              {
+                content: "make the controls keyboard friendly",
+                role: "user",
+                timestamp: "2026-04-11T12:50:30.000Z",
+              },
+            ],
+            remoteSessionId: "sess_lagging_terminal_event",
+            title: "please build a snake game",
+            updatedAt: "2026-04-11T12:50:30.000Z",
+            workspaceId: "ws-d--workspace-anyclaw-workflows",
+          },
+        ],
+        version: 2,
+      }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<ApprovalProbe />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId("session-id")).toHaveTextContent("sess_lagging_terminal_event");
+      expect(screen.getByTestId("message-count")).toHaveTextContent("2");
+    });
+
+    await waitFor(() => {
+      expect(fetchMock.mock.calls.some(([input]) => requestURL(input) === "/events?limit=50")).toBe(true);
+      expect(screen.getByTestId("message-count")).toHaveTextContent("1");
+    }, { timeout: 5000 });
+
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+
+    expect(screen.getByTestId("task-phase")).toHaveTextContent("idle");
+  }, 10000);
+
   it("binds a new remote session before approval resume when the waiting response has no messages yet", async () => {
     const approval = {
       action: "tool_call",
