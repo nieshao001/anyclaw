@@ -175,11 +175,11 @@ export function Composer({
 
             <div className="flex items-center justify-between gap-4">
               <span className="text-xs text-[#98a2b3]">
-                {setupRequired ? "先配置模型提供商，再开始当前会话" : isSending ? "正在思考..." : "Enter 发送 · Shift + Enter 换行"}
+                {setupRequired ? "先配置模型提供商，再开始当前会话" : isSending ? "正在处理..." : "Enter 发送 · Shift + Enter 换行"}
               </span>
 
               <button
-                aria-label={isSending ? "正在思考" : "发送消息"}
+                aria-label={isSending ? "正在处理" : "发送消息"}
                 className="flex h-11 w-11 items-center justify-center rounded-full bg-[#bfc8d8] text-white transition-all duration-150 hover:bg-[#1f2430] disabled:cursor-not-allowed disabled:bg-[#d7dde7]"
                 disabled={!canSend || isSending}
                 onClick={onSend}

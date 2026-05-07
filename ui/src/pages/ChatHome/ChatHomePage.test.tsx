@@ -276,6 +276,87 @@ describe("ChatHomePage", () => {
     expect(screen.getByText("命令: pnpm test")).toBeInTheDocument();
   });
 
+  it("collapses Codex-style task summaries behind a processed duration", () => {
+    webChatState = {
+      ...webChatState,
+      messages: [
+        {
+          content: "帮我打开页面",
+          role: "user",
+          timestamp: "2026-04-11T12:00:00.000Z",
+        },
+        {
+          content: "已处理：\n- 已打开文件 anyclaw_webpage.html。\n\n已验证：\n- 已确认桌面窗口出现。\n\n未确认/阻塞：\n- 无",
+          role: "assistant",
+          timestamp: "2026-04-11T12:02:43.000Z",
+        },
+      ],
+    };
+
+    renderPage();
+
+    expect(screen.getByText("已打开文件 anyclaw_webpage.html。")).toBeInTheDocument();
+    const toggle = screen.getByRole("button", { name: /已处理 2m 43s/i });
+    expect(toggle).toBeInTheDocument();
+    expect(screen.queryByText("已确认桌面窗口出现。")).not.toBeInTheDocument();
+
+    fireEvent.click(toggle);
+
+    expect(screen.getByText("已确认桌面窗口出现。")).toBeInTheDocument();
+  });
+
+  it("collapses AnyClaw handled-only summaries with half-width colons", () => {
+    webChatState = {
+      ...webChatState,
+      messages: [
+        {
+          content: "帮我重新运行",
+          role: "user",
+          timestamp: "2026-04-11T12:00:00.000Z",
+        },
+        {
+          content: "已处理:\n\n已完成 run_command。\n已完成 computer_observe。\n\nrun_command 已成功返回：run_command completed",
+          role: "assistant",
+          timestamp: "2026-04-11T12:00:08.000Z",
+        },
+      ],
+    };
+
+    renderPage();
+
+    expect(screen.getByText("已完成 run_command。")).toBeInTheDocument();
+    const toggle = screen.getByRole("button", { name: /已处理 8s/i });
+    expect(toggle).toBeInTheDocument();
+    expect(screen.queryByText(/computer_observe/)).not.toBeInTheDocument();
+
+    fireEvent.click(toggle);
+
+    expect(screen.getAllByText(/run_command/).length).toBeGreaterThan(0);
+  });
+
+  it("shows a Codex-style processed duration for normal assistant replies", () => {
+    webChatState = {
+      ...webChatState,
+      messages: [
+        {
+          content: "你好",
+          role: "user",
+          timestamp: "2026-04-11T12:00:00.000Z",
+        },
+        {
+          content: "你好！我是 AnyClaw。",
+          role: "assistant",
+          timestamp: "2026-04-11T12:00:03.000Z",
+        },
+      ],
+    };
+
+    renderPage();
+
+    expect(screen.getByRole("button", { name: /已处理 3s/i })).toBeInTheDocument();
+    expect(screen.getByText("你好！我是 AnyClaw。")).toBeInTheDocument();
+  });
+
   it("shows user-facing error guidance in the composer", () => {
     webChatState = {
       ...webChatState,

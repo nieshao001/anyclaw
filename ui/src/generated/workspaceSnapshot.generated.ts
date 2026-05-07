@@ -8,7 +8,7 @@ export const workspaceSnapshot = {
   "workspaceId": "ws-24d88fd00d7aa7ea",
   "agent": {
     "name": "AnyClaw",
-    "description": "Your AI assistant with file-based memory",
+    "description": "Your AI assistant with Codex-style runtime memory",
     "permissionLevel": "limited",
     "workDir": ".anyclaw",
     "workingDir": "workflows/default",
@@ -44,7 +44,7 @@ export const workspaceSnapshot = {
   "agents": [
     {
       "name": "AnyClaw",
-      "description": "Your AI assistant with file-based memory",
+      "description": "Your AI assistant with Codex-style runtime memory",
       "role": "main",
       "permissionLevel": "limited",
       "workingDir": "workflows/default",

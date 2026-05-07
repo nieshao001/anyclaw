@@ -89,6 +89,14 @@ type GatewayApproval = {
   tool_name?: string;
 };
 
+type GatewayEvent = {
+  id?: string;
+  payload?: Record<string, unknown>;
+  session_id?: string;
+  timestamp?: string;
+  type?: string;
+};
+
 type ChatResponse = {
   approvals?: GatewayApproval[];
   response?: string;
@@ -116,8 +124,9 @@ export const CHAT_DELETE_EVENT = "anyclaw:chat-delete";
 
 const STORAGE_VERSION = 2;
 const DEFAULT_WORKSPACE_ID = "workspace-default";
-const APPROVAL_POLL_ATTEMPTS = 18;
+const APPROVAL_POLL_ATTEMPTS = 120;
 const APPROVAL_POLL_INTERVAL_MS = 900;
+const CURRENT_SESSION_SYNC_INTERVAL_MS = 2000;
 const REMOTE_SESSION_SYNC_INTERVAL_MS = 4000;
 const EMPTY_PERSISTED_STATE: PersistedChatState = {
   selectedSessionKey: null,
@@ -146,6 +155,7 @@ function deriveChatTaskState(params: {
   messages: ChatMessage[];
   pendingApprovalCount: number;
   sessionPresence: string | null;
+  sessionCompleted: boolean;
   sessionTyping: boolean;
 }): ChatTaskState {
   const presence = (params.sessionPresence ?? "").trim().toLowerCase();
@@ -166,8 +176,8 @@ function deriveChatTaskState(params: {
       canCancel: false,
       canContinue: false,
       canRetry: false,
-      detail: "确认已提交，正在继续执行后续步骤。",
-      label: "正在执行",
+      detail: "确认已提交，正在继续处理后续步骤。",
+      label: "正在处理",
       phase: "running",
     };
   }
@@ -179,8 +189,8 @@ function deriveChatTaskState(params: {
       canCancel: true,
       canContinue: false,
       canRetry: false,
-      detail: running ? "Agent 正在整理上下文并生成回复。" : "任务已收到，正在准备执行。",
-      label: running ? "正在执行" : "准备中",
+      detail: running ? "Agent 正在处理任务，完成后会显示已处理、已验证和未确认信息。" : "任务已收到，正在准备处理。",
+      label: running ? "正在处理" : "准备中",
       phase: running ? "running" : "preparing",
     };
   }
@@ -196,6 +206,17 @@ function deriveChatTaskState(params: {
       label: retryable ? "可重试" : "失败",
       phase: retryable ? "retryable" : "failed",
       technicalDetail: params.error,
+    };
+  }
+
+  if (params.sessionCompleted) {
+    return {
+      canCancel: false,
+      canContinue: true,
+      canRetry: false,
+      detail: "上一轮任务已经结束，可以继续追问或开始新任务。",
+      label: "已完成",
+      phase: "completed",
     };
   }
 
@@ -313,6 +334,11 @@ function truncateText(value: string, maxLength = 36) {
   return `${compact.slice(0, maxLength).trimEnd()}...`;
 }
 
+function normalizeDuplicateText(value: string | null | undefined) {
+  const normalized = (value ?? "").replace(/\s+/g, " ").trim().toLowerCase();
+  return normalized === "" ? null : normalized;
+}
+
 function normalizeMessage(input: unknown): ChatMessage | null {
   if (!input || typeof input !== "object") return null;
 
@@ -356,6 +382,26 @@ function normalizeApproval(input: unknown): ChatApproval | null {
 function normalizeApprovals(input: unknown) {
   if (!Array.isArray(input)) return [];
   return input.map((approval) => normalizeApproval(approval)).filter((approval): approval is ChatApproval => approval !== null);
+}
+
+function normalizeGatewayEvent(input: unknown): GatewayEvent | null {
+  if (!input || typeof input !== "object") return null;
+
+  const event = input as GatewayEvent;
+  if (typeof event.type !== "string" || event.type.trim() === "") return null;
+
+  return {
+    id: typeof event.id === "string" && event.id.trim() !== "" ? event.id : undefined,
+    payload: event.payload && typeof event.payload === "object" ? event.payload : undefined,
+    session_id: typeof event.session_id === "string" && event.session_id.trim() !== "" ? event.session_id : undefined,
+    timestamp: typeof event.timestamp === "string" && event.timestamp.trim() !== "" ? event.timestamp : undefined,
+    type: event.type,
+  };
+}
+
+function normalizeGatewayEvents(input: unknown) {
+  if (!Array.isArray(input)) return [];
+  return input.map((event) => normalizeGatewayEvent(event)).filter((event): event is GatewayEvent => event !== null);
 }
 
 function sleep(ms: number) {
@@ -457,6 +503,71 @@ function buildStoredSession(params: {
   } satisfies StoredChatSession;
 }
 
+function firstUserMessageText(session: StoredChatSession) {
+  return normalizeDuplicateText(session.messages.find((message) => message.role === "user")?.content);
+}
+
+function sessionsShareFirstUserContext(left: StoredChatSession, right: StoredChatSession) {
+  const leftFirstUserText = firstUserMessageText(left);
+  if (!leftFirstUserText || leftFirstUserText !== firstUserMessageText(right)) return false;
+  return isSameAgentName(left.agentName, right.agentName) && normalizeWorkspaceId(left.workspaceId) === normalizeWorkspaceId(right.workspaceId);
+}
+
+function mergeStoredSessionVersion(existing: StoredChatSession, incoming: StoredChatSession, selectedSessionKey: string | null) {
+  const existingTime = getTimeValue(existing.updatedAt);
+  const incomingTime = getTimeValue(incoming.updatedAt);
+  const preferIncoming =
+    incoming.key === selectedSessionKey ||
+    (existing.key !== selectedSessionKey &&
+      (incoming.messages.length > existing.messages.length ||
+        (incoming.messages.length === existing.messages.length && incomingTime >= existingTime)));
+  const primary = preferIncoming ? incoming : existing;
+  const secondary = preferIncoming ? existing : incoming;
+  const key = existing.key === selectedSessionKey ? existing.key : incoming.key === selectedSessionKey ? incoming.key : primary.key;
+
+  return buildStoredSession({
+    agentName: primary.agentName ?? secondary.agentName,
+    createdAt:
+      getTimeValue(primary.createdAt) <= getTimeValue(secondary.createdAt)
+        ? primary.createdAt
+        : secondary.createdAt,
+    existing: {
+      ...primary,
+      key,
+      remoteSessionId: primary.remoteSessionId ?? secondary.remoteSessionId,
+    },
+    key,
+    messages: primary.messages.length >= secondary.messages.length ? primary.messages : secondary.messages,
+    remoteSessionId: primary.remoteSessionId ?? secondary.remoteSessionId,
+    title: primary.title ?? secondary.title,
+    updatedAt:
+      getTimeValue(primary.updatedAt) >= getTimeValue(secondary.updatedAt)
+        ? primary.updatedAt
+        : secondary.updatedAt,
+    workspaceId: primary.workspaceId ?? secondary.workspaceId,
+  });
+}
+
+function sessionsShareHardIdentity(left: StoredChatSession, right: StoredChatSession) {
+  if (left.key === right.key) return true;
+  return Boolean(left.remoteSessionId && right.remoteSessionId && left.remoteSessionId === right.remoteSessionId);
+}
+
+function dedupeSessions(sessions: StoredChatSession[], selectedSessionKey: string | null = null) {
+  const merged: StoredChatSession[] = [];
+
+  for (const session of sessions) {
+    const matchIndex = merged.findIndex((candidate) => sessionsShareHardIdentity(candidate, session));
+    if (matchIndex >= 0) {
+      merged[matchIndex] = mergeStoredSessionVersion(merged[matchIndex], session, selectedSessionKey);
+      continue;
+    }
+    merged.push(session);
+  }
+
+  return sortSessions(merged);
+}
+
 function normalizeStoredSession(input: unknown): StoredChatSession | null {
   if (!input || typeof input !== "object") return null;
 
@@ -535,10 +646,11 @@ function normalizePersistedState(input: unknown): PersistedChatState | null {
   const parsed = input as Partial<PersistedChatState>;
   if (!Array.isArray(parsed.sessions)) return null;
 
-  const sessions = parsed.sessions
+  const normalizedSessions = parsed.sessions
     .map((session) => normalizeStoredSession(session))
-    .filter((session): session is StoredChatSession => session !== null)
-    .sort((left, right) => new Date(right.updatedAt).getTime() - new Date(left.updatedAt).getTime());
+    .filter((session): session is StoredChatSession => session !== null);
+  const selectedCandidate = typeof parsed.selectedSessionKey === "string" ? parsed.selectedSessionKey : null;
+  const sessions = dedupeSessions(normalizedSessions, selectedCandidate);
 
   const selectedSessionKey =
     typeof parsed.selectedSessionKey === "string" && sessions.some((session) => session.key === parsed.selectedSessionKey)
@@ -631,6 +743,21 @@ function mapSessionMessages(session: GatewaySession | undefined, fallbackAgentNa
       role: message.role,
       timestamp: message.created_at || new Date().toISOString(),
     }));
+}
+
+function latestMessageTime(messages: ChatMessage[]) {
+  return messages.map((message) => getTimeValue(message.timestamp)).reduce((latest, value) => Math.max(latest, value), 0);
+}
+
+function selectTerminalReferenceMessages(
+  session: GatewaySession | null | undefined,
+  fallbackAgentName: string | null,
+  fallbackMessages: ChatMessage[],
+) {
+  const mappedMessages = mapSessionMessages(session ?? undefined, fallbackAgentName);
+  if (mappedMessages.length === 0) return fallbackMessages;
+  if (fallbackMessages.length === 0) return mappedMessages;
+  return latestMessageTime(fallbackMessages) > latestMessageTime(mappedMessages) ? fallbackMessages : mappedMessages;
 }
 
 function sessionBelongsToWorkspace(session: StoredChatSession, workspaceId: string | null) {
@@ -730,6 +857,28 @@ function pickPreferredSessionVersion(
   };
 }
 
+function findLocalSessionForRemote(
+  sessions: StoredChatSession[],
+  remoteSession: StoredChatSession,
+  selectedSessionKey: string | null,
+  workspaceId: string | null,
+) {
+  return sessions
+    .filter(
+      (session) =>
+        !session.remoteSessionId &&
+        sessionBelongsToWorkspace(session, workspaceId) &&
+        session.key === selectedSessionKey &&
+        sessionsShareFirstUserContext(session, remoteSession),
+    )
+    .sort((left, right) => {
+      if (left.key === selectedSessionKey) return -1;
+      if (right.key === selectedSessionKey) return 1;
+      if (left.messages.length !== right.messages.length) return right.messages.length - left.messages.length;
+      return getTimeValue(right.updatedAt) - getTimeValue(left.updatedAt);
+    })[0] ?? null;
+}
+
 function mergeRemoteSessions(
   state: ChatState,
   agentName: string | null,
@@ -747,8 +896,19 @@ function mergeRemoteSessions(
 
   const mergedRemoteSessions = remoteSessions
     .map((session) => {
-      const existing = localSessionsByRemoteId.get(session.id) ?? null;
-      const mapped = mapGatewaySessionToStoredSession(session, normalizedWorkspaceId, existing);
+      const existingByRemoteId = localSessionsByRemoteId.get(session.id) ?? null;
+      const mappedForMatch = mapGatewaySessionToStoredSession(session, normalizedWorkspaceId, existingByRemoteId);
+      if (!mappedForMatch) return null;
+
+      const existing = existingByRemoteId ?? findLocalSessionForRemote(
+        state.sessions,
+        mappedForMatch,
+        state.selectedSessionKey,
+        normalizedWorkspaceId,
+      );
+      const mapped = existing === existingByRemoteId
+        ? mappedForMatch
+        : mapGatewaySessionToStoredSession(session, normalizedWorkspaceId, existing);
       if (!mapped) return null;
 
       return pickPreferredSessionVersion(existing, mapped, state.selectedSessionKey, isSending);
@@ -766,8 +926,8 @@ function mergeRemoteSessions(
     return session.key === state.selectedSessionKey || session.remoteSessionId === state.sessionId;
   });
 
-  const workspaceSessions = sortSessions([...localOnlySessions, ...mergedRemoteSessions, ...retainedActiveSessions]);
-  const sessions = sortSessions([...sessionsOutsideWorkspace, ...workspaceSessions]);
+  const workspaceSessions = dedupeSessions([...localOnlySessions, ...mergedRemoteSessions, ...retainedActiveSessions], state.selectedSessionKey);
+  const sessions = dedupeSessions([...sessionsOutsideWorkspace, ...workspaceSessions], state.selectedSessionKey);
   const keepBlankConversation =
     state.selectedSessionKey === null &&
     state.sessionId === null &&
@@ -795,20 +955,10 @@ function mergeRemoteSessions(
     };
   }
 
-  const fallbackSession = findLatestSessionForAgent(sessions, agentName, normalizedWorkspaceId);
-  if (!fallbackSession) {
-    return {
-      messages: [],
-      selectedSessionKey: null,
-      sessionId: null,
-      sessions,
-    };
-  }
-
   return {
-    messages: fallbackSession.messages,
-    selectedSessionKey: fallbackSession.key,
-    sessionId: fallbackSession.remoteSessionId,
+    messages: state.messages,
+    selectedSessionKey: state.selectedSessionKey,
+    sessionId: state.sessionId,
     sessions,
   };
 }
@@ -831,9 +981,15 @@ function createInitialChatState(agentName: string | null, workspaceId: string | 
 }
 
 function toPersistedState(state: ChatState): PersistedChatState {
+  const sessions = dedupeSessions(state.sessions, state.selectedSessionKey);
+  const selectedSessionKey =
+    state.selectedSessionKey && sessions.some((session) => session.key === state.selectedSessionKey)
+      ? state.selectedSessionKey
+      : findSessionByRemoteId(sessions, state.sessionId)?.key ?? null;
+
   return {
-    selectedSessionKey: state.selectedSessionKey,
-    sessions: sortSessions(state.sessions),
+    selectedSessionKey,
+    sessions,
     version: STORAGE_VERSION,
   };
 }
@@ -887,19 +1043,20 @@ function upsertConversation(
     workspaceId: normalizedWorkspaceId,
   });
 
-  const sessions = sortSessions(
+  const sessions = dedupeSessions(
     state.sessions.filter(
       (session) =>
         session.key !== storedSession.key &&
         (!storedSession.remoteSessionId || session.remoteSessionId !== storedSession.remoteSessionId),
     ),
+    storedSession.key,
   );
 
   return {
     messages: storedSession.messages,
     selectedSessionKey: storedSession.key,
     sessionId: storedSession.remoteSessionId,
-    sessions: sortSessions([storedSession, ...sessions]),
+    sessions: dedupeSessions([storedSession, ...sessions], storedSession.key),
   };
 }
 
@@ -911,6 +1068,7 @@ function bindRemoteSession(
   messages: ChatMessage[],
   options?: {
     createdAt?: string | null;
+    focus?: boolean;
     title?: string | null;
     updatedAt?: string | null;
   },
@@ -918,7 +1076,22 @@ function bindRemoteSession(
   if (!remoteSessionId) return state;
 
   const normalizedWorkspaceId = normalizeWorkspaceId(workspaceId);
-  const existingSession = findSessionByRemoteId(state.sessions, remoteSessionId, normalizedWorkspaceId) ?? undefined;
+  const existingByRemoteId = findSessionByRemoteId(state.sessions, remoteSessionId, normalizedWorkspaceId) ?? undefined;
+  const mappedForMatch = buildStoredSession({
+    agentName,
+    createdAt: options?.createdAt ?? existingByRemoteId?.createdAt ?? null,
+    existing: existingByRemoteId,
+    key: existingByRemoteId?.key ?? remoteSessionId,
+    messages,
+    remoteSessionId,
+    title: options?.title ?? existingByRemoteId?.title ?? null,
+    updatedAt: options?.updatedAt ?? existingByRemoteId?.updatedAt ?? null,
+    workspaceId: normalizedWorkspaceId,
+  });
+  const existingSession =
+    existingByRemoteId ??
+    findLocalSessionForRemote(state.sessions, mappedForMatch, state.selectedSessionKey, normalizedWorkspaceId) ??
+    undefined;
   const storedSession = buildStoredSession({
     agentName,
     createdAt: options?.createdAt ?? existingSession?.createdAt ?? null,
@@ -931,15 +1104,23 @@ function bindRemoteSession(
     workspaceId: normalizedWorkspaceId,
   });
 
-  const sessions = sortSessions(
+  const sessions = dedupeSessions(
     state.sessions.filter((session) => session.key !== storedSession.key && session.remoteSessionId !== storedSession.remoteSessionId),
+    storedSession.key,
   );
+
+  if (options?.focus === false && state.selectedSessionKey !== storedSession.key && state.sessionId !== storedSession.remoteSessionId) {
+    return {
+      ...state,
+      sessions: dedupeSessions([storedSession, ...sessions], state.selectedSessionKey),
+    };
+  }
 
   return {
     messages: storedSession.messages,
     selectedSessionKey: storedSession.key,
     sessionId: storedSession.remoteSessionId,
-    sessions: sortSessions([storedSession, ...sessions]),
+    sessions: dedupeSessions([storedSession, ...sessions], storedSession.key),
   };
 }
 
@@ -977,6 +1158,65 @@ function removeConversationByRemoteId(state: ChatState, agentName: string | null
   return removeConversation(state, agentName, workspaceId, session.key);
 }
 
+function eventTimeValue(event: GatewayEvent) {
+  return getTimeValue(event.timestamp);
+}
+
+function latestChatFailureEvent(events: GatewayEvent[], activeSessionId: string) {
+  return events
+    .filter((event) => event.type === "chat.failed" && event.session_id === activeSessionId)
+    .sort((left, right) => eventTimeValue(right) - eventTimeValue(left))[0] ?? null;
+}
+
+function latestChatCompletedEvent(events: GatewayEvent[], activeSessionId: string) {
+  return events
+    .filter((event) => event.type === "chat.completed" && event.session_id === activeSessionId)
+    .sort((left, right) => eventTimeValue(right) - eventTimeValue(left))[0] ?? null;
+}
+
+function latestChatCancelledEvent(events: GatewayEvent[], activeSessionId: string) {
+  return events
+    .filter((event) => event.type === "chat.cancelled" && event.session_id === activeSessionId)
+    .sort((left, right) => eventTimeValue(right) - eventTimeValue(left))[0] ?? null;
+}
+
+function eventIdentity(event: GatewayEvent, fallback: string) {
+  return event.id ?? `${event.type ?? fallback}:${event.session_id ?? ""}:${event.timestamp ?? ""}`;
+}
+
+function chatFailureError(event: GatewayEvent) {
+  const payload = event.payload;
+  if (payload && typeof payload.error === "string" && payload.error.trim() !== "") {
+    return payload.error.trim();
+  }
+  return "Chat request failed.";
+}
+
+function shouldSurfaceChatFailure(event: GatewayEvent, messages: ChatMessage[]) {
+  const failureTime = eventTimeValue(event);
+  if (failureTime <= 0) return true;
+
+  const lastMessageTime = latestMessageTime(messages);
+
+  return lastMessageTime <= failureTime;
+}
+
+function shouldSurfaceChatCompleted(event: GatewayEvent, messages: ChatMessage[]) {
+  const completedTime = eventTimeValue(event);
+  if (completedTime <= 0) return true;
+
+  const lastUserMessageTime = messages
+    .filter((message) => message.role === "user")
+    .map((message) => getTimeValue(message.timestamp))
+    .reduce((latest, value) => Math.max(latest, value), 0);
+
+  return lastUserMessageTime <= completedTime;
+}
+
+function shouldSurfaceChatCancelled(event: GatewayEvent, messages: ChatMessage[]) {
+  return shouldSurfaceChatCompleted(event, messages);
+}
+
 export function useWebChat(agentName: string | null, workspacePath: string | null, snapshotWorkspaceId?: string | null) {
   const initialWorkspaceId = looksAbsoluteWorkspacePath(workspacePath)
     ? deriveWorkspaceId(workspacePath)
@@ -989,14 +1229,24 @@ export function useWebChat(agentName: string | null, workspacePath: string | nul
   const [allPendingApprovals, setAllPendingApprovals] = useState<ChatApproval[]>([]);
   const [pendingApprovals, setPendingApprovals] = useState<ChatApproval[]>([]);
   const [sessionPresence, setSessionPresence] = useState<string | null>(null);
+  const [sessionCompleted, setSessionCompleted] = useState(false);
   const [sessionTyping, setSessionTyping] = useState(false);
   const [workspaceId, setWorkspaceId] = useState<string | null>(() =>
     initialWorkspaceId,
   );
   const previousAgentNameRef = useRef<string | null>(normalizeAgentName(agentName));
+  const lastHandledCompletedEventRef = useRef<string | null>(null);
+  const lastHandledCancelledEventRef = useRef<string | null>(null);
+  const lastHandledFailureEventRef = useRef<string | null>(null);
+  const latestMessagesRef = useRef<ChatMessage[]>([]);
+  const sendingRef = useRef(false);
 
   const { messages, selectedSessionKey, sessionId, sessions } = chatState;
   const approvalNoticeApprovals = pendingApprovals.length > 0 ? pendingApprovals : allPendingApprovals;
+
+  useEffect(() => {
+    latestMessagesRef.current = messages;
+  }, [messages]);
 
   useEffect(() => {
     const payload = toPersistedState(chatState);
@@ -1042,6 +1292,7 @@ export function useWebChat(agentName: string | null, workspacePath: string | nul
       setApprovalActionId(null);
       setPendingApprovals([]);
       setSessionPresence(null);
+      setSessionCompleted(false);
       setSessionTyping(false);
       setChatState((current) => startNewConversation(current));
     };
@@ -1055,6 +1306,7 @@ export function useWebChat(agentName: string | null, workspacePath: string | nul
       setApprovalActionId(null);
       setPendingApprovals([]);
       setSessionPresence(null);
+      setSessionCompleted(false);
       setSessionTyping(false);
       setChatState((current) => hydrateSession(current, detail.sessionKey!, workspaceId));
     };
@@ -1154,11 +1406,94 @@ export function useWebChat(agentName: string | null, workspacePath: string | nul
     return normalizeApprovals(await requestJSON<GatewayApproval[]>("/approvals?status=pending"));
   }
 
+  async function fetchRecentEvents() {
+    try {
+      return normalizeGatewayEvents(await requestJSON<GatewayEvent[]>("/events?limit=50"));
+    } catch {
+      return [];
+    }
+  }
+
+  function applyLatestChatFailure(events: GatewayEvent[], activeSessionId: string, referenceMessages: ChatMessage[]) {
+    const failure = latestChatFailureEvent(events, activeSessionId);
+    if (!failure || !shouldSurfaceChatFailure(failure, referenceMessages)) return false;
+
+    const failureKey = eventIdentity(failure, "chat.failed");
+    if (lastHandledFailureEventRef.current === failureKey) return true;
+
+    lastHandledFailureEventRef.current = failureKey;
+    setSessionPresence("idle");
+    setSessionTyping(false);
+    setSessionCompleted(false);
+    setError(chatFailureError(failure));
+    return true;
+  }
+
+  function applyLatestChatCompleted(events: GatewayEvent[], activeSessionId: string, referenceMessages: ChatMessage[]) {
+    const completed = latestChatCompletedEvent(events, activeSessionId);
+    if (!completed || !shouldSurfaceChatCompleted(completed, referenceMessages)) return false;
+
+    const completedKey = eventIdentity(completed, "chat.completed");
+    if (lastHandledCompletedEventRef.current === completedKey) return true;
+
+    lastHandledCompletedEventRef.current = completedKey;
+    setSessionPresence("idle");
+    setSessionTyping(false);
+    setSessionCompleted(true);
+    setError(null);
+    return true;
+  }
+
+  function applyLatestChatCancelled(events: GatewayEvent[], activeSessionId: string, referenceMessages: ChatMessage[]) {
+    const cancelled = latestChatCancelledEvent(events, activeSessionId);
+    if (!cancelled || !shouldSurfaceChatCancelled(cancelled, referenceMessages)) return false;
+
+    const cancelledKey = eventIdentity(cancelled, "chat.cancelled");
+    if (lastHandledCancelledEventRef.current === cancelledKey) return true;
+
+    lastHandledCancelledEventRef.current = cancelledKey;
+    setSessionPresence("idle");
+    setSessionTyping(false);
+    setSessionCompleted(true);
+    setError(null);
+    return true;
+  }
+
+  function applyLatestChatTerminalEvent(events: GatewayEvent[], activeSessionId: string, referenceMessages: ChatMessage[]) {
+    const failure = latestChatFailureEvent(events, activeSessionId);
+    const completed = latestChatCompletedEvent(events, activeSessionId);
+    const cancelled = latestChatCancelledEvent(events, activeSessionId);
+
+    const latest = [failure, completed, cancelled]
+      .filter((event): event is GatewayEvent => event !== null)
+      .sort((left, right) => eventTimeValue(right) - eventTimeValue(left))[0];
+
+    if (latest?.type === "chat.failed") {
+      return applyLatestChatFailure(events, activeSessionId, referenceMessages);
+    }
+    if (latest?.type === "chat.cancelled") {
+      return applyLatestChatCancelled(events, activeSessionId, referenceMessages);
+    }
+    if (latest?.type === "chat.completed") {
+      return applyLatestChatCompleted(events, activeSessionId, referenceMessages);
+    }
+    return false;
+  }
+
+  async function syncLatestChatTerminalEvent(activeSessionId: string | null, referenceMessages: ChatMessage[]) {
+    if (!activeSessionId) return false;
+    const events = await fetchRecentEvents();
+    return applyLatestChatTerminalEvent(events, activeSessionId, referenceMessages);
+  }
+
   function applySessionSnapshot(session: GatewaySession | null) {
     if (!session) return;
 
     setSessionPresence(normalizeTextValue(session.presence));
     setSessionTyping(Boolean(session.typing));
+    if (isWaitingApprovalStatus(session.presence) || session.typing) {
+      setSessionCompleted(false);
+    }
 
     const mappedMessages = mapSessionMessages(session, agentName);
     if (mappedMessages.length === 0) return;
@@ -1167,6 +1502,7 @@ export function useWebChat(agentName: string | null, workspacePath: string | nul
       if (session.id) {
         return bindRemoteSession(current, agentName, workspaceId, session.id, mappedMessages, {
           createdAt: session.created_at ?? null,
+          focus: current.sessionId === session.id || current.selectedSessionKey === session.id,
           title: session.title ?? null,
           updatedAt: session.updated_at ?? null,
         });
@@ -1215,6 +1551,7 @@ export function useWebChat(agentName: string | null, workspacePath: string | nul
     }
 
     const session = options?.skipSession ? null : await fetchSessionSnapshot(activeSessionId);
+    const terminalReferenceMessages = selectTerminalReferenceMessages(session, agentName, latestMessagesRef.current);
     if (session) {
       applySessionSnapshot(session);
     }
@@ -1222,6 +1559,7 @@ export function useWebChat(agentName: string | null, workspacePath: string | nul
     const allApprovals = await fetchAllPendingApprovals();
     const approvals = filterSessionApprovals(allApprovals, session?.id ?? activeSessionId);
     applyApprovalSnapshot(allApprovals, session?.id ?? activeSessionId);
+    await syncLatestChatTerminalEvent(activeSessionId, terminalReferenceMessages);
 
     return { approvals, session };
   }
@@ -1280,6 +1618,7 @@ export function useWebChat(agentName: string | null, workspacePath: string | nul
 
       try {
         const session = await fetchSessionSnapshot(activeSessionId);
+        const terminalReferenceMessages = selectTerminalReferenceMessages(session, agentName, latestMessagesRef.current);
         applySessionSnapshot(session);
 
         const allApprovals = await fetchAllPendingApprovals();
@@ -1290,15 +1629,15 @@ export function useWebChat(agentName: string | null, workspacePath: string | nul
         const waitingApproval = isWaitingApprovalStatus(session?.presence);
         const typing = Boolean(session?.typing);
 
+        if (approvals.length > 0) return;
+        if (await syncLatestChatTerminalEvent(activeSessionId, terminalReferenceMessages)) return;
+        if (messageCount > baselineMessageCount && !waitingApproval && !typing) return;
         if (!waitingApproval && !typing) {
           idleStreak += 1;
+          if (idleStreak >= 2) return;
         } else {
           idleStreak = 0;
         }
-
-        if (approvals.length > 0) return;
-        if (messageCount > baselineMessageCount && idleStreak >= 1) return;
-        if (idleStreak >= 2) return;
       } catch (pollError) {
         if (getErrorMessage(pollError).includes("session not found")) {
           applyApprovalSnapshot([], null);
@@ -1337,7 +1676,10 @@ export function useWebChat(agentName: string | null, workspacePath: string | nul
         return;
       }
       await syncSessionState(targetSessionId);
-      setError("Approval request was rejected.");
+      setSessionPresence("idle");
+      setSessionTyping(false);
+      setSessionCompleted(true);
+      setError(null);
     } catch (resolveError) {
       setError(getErrorMessage(resolveError));
     } finally {
@@ -1351,6 +1693,7 @@ export function useWebChat(agentName: string | null, workspacePath: string | nul
     setAllPendingApprovals([]);
     setPendingApprovals([]);
     setSessionPresence(null);
+    setSessionCompleted(false);
     setSessionTyping(false);
     setChatState((current) => startNewConversation(current));
   }
@@ -1362,12 +1705,13 @@ export function useWebChat(agentName: string | null, workspacePath: string | nul
     setAllPendingApprovals([]);
     setPendingApprovals([]);
     setSessionPresence(null);
+    setSessionCompleted(false);
     setSessionTyping(false);
     setChatState((current) => hydrateSession(current, sessionKey, workspaceId));
   }
 
   async function deleteSession(sessionKey: string) {
-    const sessionToDelete = getSessionByKey(sessions, sessionKey, workspaceId);
+    const sessionToDelete = getSessionByKey(sessions, sessionKey, workspaceId) ?? sessions.find((session) => session.key === sessionKey) ?? null;
     if (!sessionToDelete) return;
 
     const deletingSelectedSession = selectedSessionKey === sessionKey;
@@ -1392,6 +1736,7 @@ export function useWebChat(agentName: string | null, workspacePath: string | nul
       setAllPendingApprovals([]);
       setPendingApprovals([]);
       setSessionPresence(null);
+      setSessionCompleted(false);
       setSessionTyping(false);
     }
 
@@ -1411,12 +1756,14 @@ export function useWebChat(agentName: string | null, workspacePath: string | nul
         const session = await fetchSessionSnapshot(sessionId);
         if (cancelled) return;
 
+        const terminalReferenceMessages = selectTerminalReferenceMessages(session, agentName, latestMessagesRef.current);
         applySessionSnapshot(session);
 
         const allApprovals = await fetchAllPendingApprovals();
         if (cancelled) return;
 
         applyApprovalSnapshot(allApprovals, session?.id ?? sessionId);
+        await syncLatestChatTerminalEvent(session?.id ?? sessionId, terminalReferenceMessages);
       } catch (syncError) {
         if (cancelled) return;
         if (getErrorMessage(syncError).includes("session not found")) {
@@ -1427,16 +1774,21 @@ export function useWebChat(agentName: string | null, workspacePath: string | nul
     }
 
     void syncCurrentSession();
+    const intervalId = window.setInterval(() => {
+      void syncCurrentSession();
+    }, CURRENT_SESSION_SYNC_INTERVAL_MS);
 
     return () => {
       cancelled = true;
+      window.clearInterval(intervalId);
     };
   }, [agentName, sessionId, workspaceId]);
 
   async function sendMessage() {
     const message = draft.trim();
     const currentSessionId = sessionId;
-    if (message === "" || isSending || pendingApprovals.length > 0) return;
+    if (message === "" || isSending || sendingRef.current || pendingApprovals.length > 0) return;
+    sendingRef.current = true;
 
     const optimisticMessage: ChatMessage = {
       content: message,
@@ -1448,6 +1800,7 @@ export function useWebChat(agentName: string | null, workspacePath: string | nul
     setError(null);
     setIsSending(true);
     setSessionPresence("typing");
+    setSessionCompleted(false);
     setSessionTyping(true);
     setChatState((current) =>
       upsertConversation(current, agentName, workspaceId, [...current.messages, optimisticMessage], current.sessionId),
@@ -1539,6 +1892,7 @@ export function useWebChat(agentName: string | null, workspacePath: string | nul
     } catch (error) {
       setError(getErrorMessage(error));
     } finally {
+      sendingRef.current = false;
       setSessionTyping(false);
       setIsSending(false);
     }
@@ -1550,6 +1904,7 @@ export function useWebChat(agentName: string | null, workspacePath: string | nul
     isSending,
     messages,
     pendingApprovalCount: approvalNoticeApprovals.length,
+    sessionCompleted,
     sessionPresence,
     sessionTyping,
   });

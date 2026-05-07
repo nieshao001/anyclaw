@@ -1,7 +1,7 @@
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { CHAT_STORAGE_KEY, useWebChat } from "./useWebChat";
+import { CHAT_DELETE_EVENT, CHAT_STORAGE_KEY, useWebChat } from "./useWebChat";
 
 const TEST_WORKSPACE_PATH = "D:\\workspace\\anyclaw\\workflows";
 
@@ -52,6 +52,7 @@ function ApprovalProbe() {
     approvalNoticeApprovals,
     chatTaskState,
     draft,
+    error,
     messages,
     pendingApprovals,
     resolveApproval,
@@ -68,6 +69,7 @@ function ApprovalProbe() {
       </button>
       <div data-testid="approval-count">{approvalNoticeApprovals.length}</div>
       <div data-testid="approval-tool">{approvalNoticeApprovals[0]?.tool_name ?? ""}</div>
+      <div data-testid="error-message">{error ?? ""}</div>
       <div data-testid="task-phase">{chatTaskState.phase}</div>
       <div data-testid="session-approval-count">{pendingApprovals.length}</div>
       <div data-testid="message-count">{messages.length}</div>
@@ -79,6 +81,13 @@ function ApprovalProbe() {
         type="button"
       >
         approve
+      </button>
+      <button
+        disabled={approvalNoticeApprovals.length === 0}
+        onClick={() => void resolveApproval(approvalNoticeApprovals[0]?.id ?? "", false)}
+        type="button"
+      >
+        reject
       </button>
     </div>
   );
@@ -371,7 +380,7 @@ describe("useWebChat persistence", () => {
     });
   });
 
-  it("hydrates remote sessions from the gateway list so browser and desktop history can sync", async () => {
+  it("syncs remote sessions without selecting one over a blank new conversation", async () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
       const url = requestURL(input);
 
@@ -406,10 +415,57 @@ describe("useWebChat persistence", () => {
     render(<HookProbe />);
 
     await waitFor(() => {
-      expect(screen.getByTestId("selected-session-key")).toHaveTextContent("sess_remote");
-      expect(screen.getByTestId("session-id")).toHaveTextContent("sess_remote");
-      expect(screen.getByTestId("message-preview")).toHaveTextContent("from desktop");
+      const persisted = JSON.parse(window.localStorage.getItem(CHAT_STORAGE_KEY) || "null");
+      expect(persisted.sessions).toHaveLength(1);
+      expect(persisted.sessions[0].remoteSessionId).toBe("sess_remote");
     });
+
+    expect(screen.getByTestId("selected-session-key")).toHaveTextContent("");
+    expect(screen.getByTestId("session-id")).toHaveTextContent("");
+    expect(screen.getByTestId("message-count")).toHaveTextContent("0");
+  });
+
+  it("keeps a blank new conversation blank when remote hello history syncs", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = requestURL(input);
+
+      if (url === "/approvals?status=pending") {
+        return jsonResponse([]);
+      }
+
+      if (url.startsWith("/sessions?workspace=")) {
+        return jsonResponse([
+          {
+            agent: "binbin",
+            created_at: "2026-04-11T14:00:00.000Z",
+            id: "sess_hello",
+            messages: [
+              {
+                content: "你好",
+                created_at: "2026-04-11T14:00:00.000Z",
+                role: "user",
+              },
+            ],
+            title: "你好",
+            updated_at: "2026-04-11T14:00:00.000Z",
+          },
+        ]);
+      }
+
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<HookProbe />);
+
+    await waitFor(() => {
+      const persisted = JSON.parse(window.localStorage.getItem(CHAT_STORAGE_KEY) || "null");
+      expect(persisted.sessions[0].remoteSessionId).toBe("sess_hello");
+    });
+
+    expect(screen.getByTestId("selected-session-key")).toHaveTextContent("");
+    expect(screen.getByTestId("message-preview")).toHaveTextContent("");
   });
 
   it("keeps the active remote session when the session list temporarily misses it", async () => {
@@ -476,6 +532,178 @@ describe("useWebChat persistence", () => {
       expect(screen.getByTestId("selected-session-key")).toHaveTextContent("session-keep");
       expect(screen.getByTestId("session-id")).toHaveTextContent("sess_keep");
       expect(screen.getByTestId("message-preview")).toHaveTextContent("still here");
+    });
+  });
+
+  it("replaces the optimistic first-message conversation with the remote session", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = requestURL(input);
+
+      if (url === "/approvals?status=pending") {
+        return jsonResponse([]);
+      }
+
+      if (url.startsWith("/sessions?workspace=")) {
+        return jsonResponse([
+          {
+            agent: "binbin",
+            created_at: "2026-04-11T16:00:00.000Z",
+            id: "sess_first_message",
+            messages: [
+              {
+                content: "你好",
+                created_at: "2026-04-11T16:00:00.000Z",
+                role: "user",
+              },
+              {
+                content: "你好，有什么我可以帮你？",
+                created_at: "2026-04-11T16:00:02.000Z",
+                role: "assistant",
+              },
+            ],
+            title: "你好",
+            updated_at: "2026-04-11T16:00:02.000Z",
+          },
+        ]);
+      }
+
+      if (url.startsWith("/chat?workspace=")) {
+        return jsonResponse({
+          response: "你好，有什么我可以帮你？",
+          session: {
+            agent: "binbin",
+            created_at: "2026-04-11T16:00:00.000Z",
+            id: "sess_first_message",
+            messages: [
+              {
+                content: "你好",
+                created_at: "2026-04-11T16:00:00.000Z",
+                role: "user",
+              },
+              {
+                content: "你好，有什么我可以帮你？",
+                created_at: "2026-04-11T16:00:02.000Z",
+                role: "assistant",
+              },
+            ],
+            title: "你好",
+            updated_at: "2026-04-11T16:00:02.000Z",
+          },
+          status: "ok",
+        });
+      }
+
+      if (url === "/sessions/sess_first_message") {
+        return jsonResponse({
+          agent: "binbin",
+          id: "sess_first_message",
+          messages: [
+            {
+              content: "你好",
+              created_at: "2026-04-11T16:00:00.000Z",
+              role: "user",
+            },
+            {
+              content: "你好，有什么我可以帮你？",
+              created_at: "2026-04-11T16:00:02.000Z",
+              role: "assistant",
+            },
+          ],
+          presence: "idle",
+          typing: false,
+        });
+      }
+
+      if (url.startsWith("/events?limit=")) {
+        return jsonResponse([]);
+      }
+
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<ApprovalProbe />);
+
+    fireEvent.change(screen.getByLabelText("draft"), {
+      target: { value: "你好" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "send" }));
+
+    await waitFor(() => {
+      expect(screen.getByTestId("session-id")).toHaveTextContent("sess_first_message");
+      expect(screen.getByTestId("message-count")).toHaveTextContent("2");
+    });
+
+    await waitFor(() => {
+      const persisted = JSON.parse(window.localStorage.getItem(CHAT_STORAGE_KEY) || "null");
+      expect(persisted.selectedSessionKey).toBeTruthy();
+      expect(persisted.sessions).toHaveLength(1);
+      expect(persisted.sessions[0].remoteSessionId).toBe("sess_first_message");
+      expect(persisted.sessions[0].messages).toHaveLength(2);
+    });
+  });
+
+  it("keeps separate remote sessions even when they start with the same user message", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = requestURL(input);
+
+      if (url === "/approvals?status=pending") {
+        return jsonResponse([]);
+      }
+
+      if (url.startsWith("/sessions?workspace=")) {
+        return jsonResponse([
+          {
+            agent: "binbin",
+            created_at: "2026-04-11T17:00:01.000Z",
+            id: "sess_duplicate_newer",
+            messages: [
+              {
+                content: "你好",
+                created_at: "2026-04-11T17:00:01.000Z",
+                role: "user",
+              },
+              {
+                content: "你好！",
+                created_at: "2026-04-11T17:00:03.000Z",
+                role: "assistant",
+              },
+            ],
+            title: "你好",
+            updated_at: "2026-04-11T17:00:03.000Z",
+          },
+          {
+            agent: "binbin",
+            created_at: "2026-04-11T17:00:00.000Z",
+            id: "sess_duplicate_older",
+            messages: [
+              {
+                content: "你好",
+                created_at: "2026-04-11T17:00:00.000Z",
+                role: "user",
+              },
+            ],
+            title: "你好",
+            updated_at: "2026-04-11T17:00:00.000Z",
+          },
+        ]);
+      }
+
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<HookProbe />);
+
+    await waitFor(() => {
+      const persisted = JSON.parse(window.localStorage.getItem(CHAT_STORAGE_KEY) || "null");
+      expect(persisted.sessions).toHaveLength(2);
+      expect(persisted.sessions.map((session: { remoteSessionId: string }) => session.remoteSessionId)).toEqual([
+        "sess_duplicate_newer",
+        "sess_duplicate_older",
+      ]);
     });
   });
 
@@ -635,6 +863,67 @@ describe("useWebChat persistence", () => {
     });
   });
 
+  it("deletes a visible legacy session even when it belongs to another workspace", async () => {
+    window.localStorage.setItem(
+      CHAT_STORAGE_KEY,
+      JSON.stringify({
+        selectedSessionKey: "legacy-session",
+        sessions: [
+          {
+            agentName: "binbin",
+            createdAt: "2026-04-30T12:00:00.000Z",
+            key: "legacy-session",
+            messages: [
+              {
+                content: "你好",
+                role: "user",
+                timestamp: "2026-04-30T12:00:00.000Z",
+              },
+            ],
+            remoteSessionId: "sess_legacy_workspace",
+            title: "你好",
+            updatedAt: "2026-04-30T12:00:00.000Z",
+            workspaceId: "ws-old-workspace",
+          },
+        ],
+        version: 2,
+      }),
+    );
+
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = requestURL(input);
+
+      if (url.startsWith("/sessions?workspace=")) {
+        return jsonResponse([]);
+      }
+
+      if (url === "/sessions/sess_legacy_workspace") {
+        return jsonResponse({ error: "session not found" }, 404);
+      }
+
+      if (url === "/approvals?status=pending") {
+        return jsonResponse([]);
+      }
+
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<HookProbe snapshotWorkspaceId="ws-current-workspace" workspacePath="workflows/default" />);
+
+    act(() => {
+      window.dispatchEvent(new CustomEvent(CHAT_DELETE_EVENT, { detail: { sessionKey: "legacy-session" } }));
+    });
+
+    await waitFor(() => {
+      const persisted = JSON.parse(window.localStorage.getItem(CHAT_STORAGE_KEY) || "null");
+      expect(persisted.sessions).toHaveLength(0);
+      expect(persisted.selectedSessionKey).toBeNull();
+      expect(screen.getByTestId("selected-session-key")).toHaveTextContent("");
+    });
+  });
+
   it("shows pending approvals and resumes the chat after approval", async () => {
     const approval = {
       action: "tool_call",
@@ -750,6 +1039,142 @@ describe("useWebChat persistence", () => {
       expect(screen.getByTestId("approval-count")).toHaveTextContent("0");
       expect(screen.getByTestId("message-count")).toHaveTextContent("2");
       expect(screen.getByTestId("message-preview")).toHaveTextContent("folder created");
+    }, { timeout: 4000 });
+  }, 10000);
+
+  it("shows a cancellation reply after rejecting an approval", async () => {
+    const approval = {
+      action: "tool_call",
+      id: "approval_reject",
+      payload: {
+        args: {
+          command: "echo anyclaw-approval-smoke",
+        },
+      },
+      requested_at: "2026-04-11T12:05:10.000Z",
+      session_id: "sess_reject",
+      status: "pending",
+      tool_name: "run_command",
+    };
+
+    let approvalPending = true;
+    let sessionMessages = [
+      {
+        content: "run approval smoke",
+        created_at: "2026-04-11T12:05:00.000Z",
+        role: "user",
+      },
+    ];
+
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = requestURL(input);
+
+      if (url.startsWith("/sessions?workspace=")) {
+        return jsonResponse([
+          {
+            agent: "binbin",
+            created_at: "2026-04-11T12:05:00.000Z",
+            id: "sess_reject",
+            messages: sessionMessages,
+            title: "run approval smoke",
+            updated_at: approvalPending ? "2026-04-11T12:05:00.000Z" : "2026-04-11T12:05:20.000Z",
+          },
+        ]);
+      }
+
+      if (url.startsWith("/chat?workspace=")) {
+        return jsonResponse({
+          approvals: [approval],
+          session: {
+            agent: "binbin",
+            id: "sess_reject",
+            messages: sessionMessages,
+            presence: "waiting_approval",
+            typing: false,
+          },
+          status: "waiting_approval",
+        });
+      }
+
+      if (url === "/approvals?status=pending") {
+        return jsonResponse(approvalPending ? [approval] : []);
+      }
+
+      if (url === "/approvals/approval_reject/resolve") {
+        expect(init?.method).toBe("POST");
+        approvalPending = false;
+        sessionMessages = [
+          ...sessionMessages,
+          {
+            content: "已处理：\n- 已取消等待确认的工具调用 `run_command`。\n\n已验证：\n- 该操作未继续执行。\n\n未确认/阻塞：\n- 用户取消。",
+            created_at: "2026-04-11T12:05:20.000Z",
+            role: "assistant",
+          },
+        ];
+
+        return jsonResponse({
+          ...approval,
+          status: "rejected",
+        });
+      }
+
+      if (url === "/sessions/sess_reject") {
+        return jsonResponse({
+          agent: "binbin",
+          id: "sess_reject",
+          messages: sessionMessages,
+          presence: approvalPending ? "waiting_approval" : "idle",
+          typing: false,
+        });
+      }
+
+      if (url === "/events?limit=50") {
+        return jsonResponse(
+          approvalPending
+            ? []
+            : [
+                {
+                  id: "evt_cancelled",
+                  payload: {
+                    approval_id: "approval_reject",
+                    reason: "用户取消",
+                    status: "rejected",
+                    tool_name: "run_command",
+                  },
+                  session_id: "sess_reject",
+                  timestamp: "2026-04-11T12:05:20.000Z",
+                  type: "chat.cancelled",
+                },
+              ],
+        );
+      }
+
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<ApprovalProbe />);
+
+    fireEvent.change(screen.getByLabelText("draft"), {
+      target: { value: "run approval smoke" },
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "send" }));
+
+    await waitFor(() => {
+      expect(screen.getByTestId("approval-count")).toHaveTextContent("1");
+      expect(screen.getByTestId("task-phase")).toHaveTextContent("awaiting_approval");
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "reject" }));
+
+    await waitFor(() => {
+      expect(screen.getByTestId("approval-count")).toHaveTextContent("0");
+      expect(screen.getByTestId("error-message")).toHaveTextContent("");
+      expect(screen.getByTestId("message-count")).toHaveTextContent("2");
+      expect(screen.getByTestId("message-preview")).toHaveTextContent("已取消等待确认的工具调用 `run_command`");
+      expect(screen.getByTestId("task-phase")).toHaveTextContent("completed");
     }, { timeout: 4000 });
   }, 10000);
 
@@ -892,6 +1317,315 @@ describe("useWebChat persistence", () => {
       expect(screen.getByTestId("message-preview")).toHaveTextContent("folder created");
     });
   }, 15000);
+
+  it("syncs a later approval that appears after the current session is already waiting", async () => {
+    const secondApproval = {
+      action: "tool_call",
+      id: "approval_second",
+      payload: {
+        args: {
+          path: "snake_game.js",
+        },
+      },
+      requested_at: "2026-04-11T12:40:45.000Z",
+      session_id: "sess_multi_approval",
+      status: "pending",
+      tool_name: "write_file",
+    };
+
+    let approvalVisible = false;
+    const sessionMessages = [
+      {
+        content: "please build a snake game",
+        created_at: "2026-04-11T12:40:00.000Z",
+        role: "user",
+      },
+    ];
+
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = requestURL(input);
+
+      if (url.startsWith("/sessions?workspace=")) {
+        return jsonResponse([
+          {
+            agent: "binbin",
+            created_at: "2026-04-11T12:40:00.000Z",
+            id: "sess_multi_approval",
+            messages: sessionMessages,
+            title: "please build a snake game",
+            updated_at: "2026-04-11T12:40:00.000Z",
+          },
+        ]);
+      }
+
+      if (url === "/approvals?status=pending") {
+        return jsonResponse(approvalVisible ? [secondApproval] : []);
+      }
+
+      if (url === "/sessions/sess_multi_approval") {
+        return jsonResponse({
+          agent: "binbin",
+          id: "sess_multi_approval",
+          messages: sessionMessages,
+          presence: "waiting_approval",
+          typing: false,
+        });
+      }
+
+      if (url === "/approvals/approval_second/resolve") {
+        expect(init?.method).toBe("POST");
+        approvalVisible = false;
+        return jsonResponse({
+          ...secondApproval,
+          status: "approved",
+        });
+      }
+
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    window.localStorage.setItem(
+      CHAT_STORAGE_KEY,
+      JSON.stringify({
+        selectedSessionKey: "sess_multi_approval",
+        sessions: [
+          {
+            agentName: "binbin",
+            createdAt: "2026-04-11T12:40:00.000Z",
+            key: "sess_multi_approval",
+            messages: [
+              {
+                content: "please build a snake game",
+                role: "user",
+                timestamp: "2026-04-11T12:40:00.000Z",
+              },
+            ],
+            remoteSessionId: "sess_multi_approval",
+            title: "please build a snake game",
+            updatedAt: "2026-04-11T12:40:00.000Z",
+            workspaceId: "ws-d--workspace-anyclaw-workflows",
+          },
+        ],
+        version: 2,
+      }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<ApprovalProbe />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId("session-id")).toHaveTextContent("sess_multi_approval");
+      expect(screen.getByTestId("approval-count")).toHaveTextContent("0");
+    });
+
+    approvalVisible = true;
+
+    await waitFor(() => {
+      expect(screen.getByTestId("approval-count")).toHaveTextContent("1");
+      expect(screen.getByTestId("approval-tool")).toHaveTextContent("write_file");
+      expect(screen.getByTestId("task-phase")).toHaveTextContent("awaiting_approval");
+    }, { timeout: 5000 });
+  }, 10000);
+
+  it("marks the current task completed when the gateway emits a completion event before the final message syncs", async () => {
+    let completionVisible = false;
+    const sessionMessages = [
+      {
+        content: "please build a snake game",
+        created_at: "2026-04-11T12:50:00.000Z",
+        role: "user",
+      },
+    ];
+
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = requestURL(input);
+
+      if (url.startsWith("/sessions?workspace=")) {
+        return jsonResponse([
+          {
+            agent: "binbin",
+            created_at: "2026-04-11T12:50:00.000Z",
+            id: "sess_completed_event",
+            messages: sessionMessages,
+            title: "please build a snake game",
+            updated_at: "2026-04-11T12:50:00.000Z",
+          },
+        ]);
+      }
+
+      if (url === "/approvals?status=pending") {
+        return jsonResponse([]);
+      }
+
+      if (url === "/sessions/sess_completed_event") {
+        return jsonResponse({
+          agent: "binbin",
+          id: "sess_completed_event",
+          messages: sessionMessages,
+          presence: "idle",
+          typing: false,
+        });
+      }
+
+      if (url === "/events?limit=50") {
+        return jsonResponse(
+          completionVisible
+            ? [
+                {
+                  id: "evt_completed",
+                  payload: {
+                    message: "please build a snake game",
+                    response_length: 120,
+                  },
+                  session_id: "sess_completed_event",
+                  timestamp: "2026-04-11T12:50:20.000Z",
+                  type: "chat.completed",
+                },
+              ]
+            : [],
+        );
+      }
+
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    window.localStorage.setItem(
+      CHAT_STORAGE_KEY,
+      JSON.stringify({
+        selectedSessionKey: "sess_completed_event",
+        sessions: [
+          {
+            agentName: "binbin",
+            createdAt: "2026-04-11T12:50:00.000Z",
+            key: "sess_completed_event",
+            messages: [
+              {
+                content: "please build a snake game",
+                role: "user",
+                timestamp: "2026-04-11T12:50:00.000Z",
+              },
+            ],
+            remoteSessionId: "sess_completed_event",
+            title: "please build a snake game",
+            updatedAt: "2026-04-11T12:50:00.000Z",
+            workspaceId: "ws-d--workspace-anyclaw-workflows",
+          },
+        ],
+        version: 2,
+      }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<ApprovalProbe />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId("session-id")).toHaveTextContent("sess_completed_event");
+      expect(screen.getByTestId("task-phase")).toHaveTextContent("idle");
+    });
+
+    completionVisible = true;
+
+    await waitFor(() => {
+      expect(screen.getByTestId("task-phase")).toHaveTextContent("completed");
+    }, { timeout: 5000 });
+  }, 10000);
+
+  it("ignores stale terminal events when the local transcript has a newer user turn", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = requestURL(input);
+
+      if (url.startsWith("/sessions?workspace=")) {
+        return jsonResponse([]);
+      }
+
+      if (url === "/approvals?status=pending") {
+        return jsonResponse([]);
+      }
+
+      if (url === "/sessions/sess_lagging_terminal_event") {
+        return jsonResponse({
+          agent: "binbin",
+          id: "sess_lagging_terminal_event",
+          messages: [
+            {
+              content: "please build a snake game",
+              created_at: "2026-04-11T12:50:00.000Z",
+              role: "user",
+            },
+          ],
+          presence: "idle",
+          typing: false,
+        });
+      }
+
+      if (url === "/events?limit=50") {
+        return jsonResponse([
+          {
+            id: "evt_completed_previous_turn",
+            payload: {
+              message: "please build a snake game",
+              response_length: 120,
+            },
+            session_id: "sess_lagging_terminal_event",
+            timestamp: "2026-04-11T12:50:20.000Z",
+            type: "chat.completed",
+          },
+        ]);
+      }
+
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    window.localStorage.setItem(
+      CHAT_STORAGE_KEY,
+      JSON.stringify({
+        selectedSessionKey: "sess_lagging_terminal_event",
+        sessions: [
+          {
+            agentName: "binbin",
+            createdAt: "2026-04-11T12:50:00.000Z",
+            key: "sess_lagging_terminal_event",
+            messages: [
+              {
+                content: "please build a snake game",
+                role: "user",
+                timestamp: "2026-04-11T12:50:00.000Z",
+              },
+              {
+                content: "make the controls keyboard friendly",
+                role: "user",
+                timestamp: "2026-04-11T12:50:30.000Z",
+              },
+            ],
+            remoteSessionId: "sess_lagging_terminal_event",
+            title: "please build a snake game",
+            updatedAt: "2026-04-11T12:50:30.000Z",
+            workspaceId: "ws-d--workspace-anyclaw-workflows",
+          },
+        ],
+        version: 2,
+      }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<ApprovalProbe />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId("session-id")).toHaveTextContent("sess_lagging_terminal_event");
+      expect(screen.getByTestId("message-count")).toHaveTextContent("2");
+    });
+
+    await waitFor(() => {
+      expect(fetchMock.mock.calls.some(([input]) => requestURL(input) === "/events?limit=50")).toBe(true);
+      expect(screen.getByTestId("message-count")).toHaveTextContent("1");
+    }, { timeout: 5000 });
+
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+
+    expect(screen.getByTestId("task-phase")).toHaveTextContent("idle");
+  }, 10000);
 
   it("binds a new remote session before approval resume when the waiting response has no messages yet", async () => {
     const approval = {

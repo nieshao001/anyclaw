@@ -628,7 +628,6 @@ func ensureDesktopConfig(configPath string, bundleRoot string) error {
 		cfg.Sandbox.ExecutionMode = "host-reviewed"
 		changed = true
 	}
-
 	if bundleRoot != "" {
 		if skillsDir := filepath.Join(bundleRoot, "skills"); pathExists(skillsDir) && cfg.Skills.Dir != skillsDir {
 			cfg.Skills.Dir = skillsDir
