@@ -147,8 +147,16 @@ func buildMarkdownSkillFileDefinition(md, name string, detail *SkillDetail) skil
 
 	var description string
 	var systemPrompt strings.Builder
+	lastPromptAppend := ""
+	frontmatterName, frontmatterDescription, bodyLines := splitMarkdownFrontmatter(lines)
+	if strings.TrimSpace(frontmatterName) != "" {
+		name = strings.TrimSpace(frontmatterName)
+	}
+	if strings.TrimSpace(frontmatterDescription) != "" {
+		description = strings.TrimSpace(frontmatterDescription)
+	}
 
-	for _, line := range lines {
+	for _, line := range bodyLines {
 		line = strings.TrimSpace(line)
 
 		if strings.HasPrefix(line, "##") || strings.HasPrefix(line, "#") {
@@ -160,7 +168,7 @@ func buildMarkdownSkillFileDefinition(md, name string, detail *SkillDetail) skil
 		}
 
 		if strings.HasPrefix(line, "-") {
-			systemPrompt.WriteString(strings.TrimPrefix(line, "- ") + " ")
+			appendSkillPromptText(&systemPrompt, &lastPromptAppend, strings.TrimPrefix(line, "- "), "space")
 			continue
 		}
 
@@ -176,7 +184,7 @@ func buildMarkdownSkillFileDefinition(md, name string, detail *SkillDetail) skil
 			continue
 		}
 
-		systemPrompt.WriteString(line + " ")
+		appendSkillPromptText(&systemPrompt, &lastPromptAppend, line, "line")
 	}
 
 	if systemPrompt.Len() == 0 {
@@ -202,6 +210,9 @@ func buildMarkdownSkillFileDefinition(md, name string, detail *SkillDetail) skil
 			description = firstNonEmpty(detail.Description, detail.Summary)
 		}
 	}
+	if description == "" {
+		description = "Skill from Skillhub"
+	}
 
 	return skillFileDefinition{
 		Name:           name,
@@ -217,4 +228,46 @@ func buildMarkdownSkillFileDefinition(md, name string, detail *SkillDetail) skil
 			"system": strings.TrimSpace(systemPrompt.String()),
 		},
 	}
+}
+
+func appendSkillPromptText(builder *strings.Builder, lastKind *string, text string, kind string) {
+	if builder == nil {
+		return
+	}
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return
+	}
+	if builder.Len() > 0 {
+		if kind == "line" && lastKind != nil && *lastKind != "space" {
+			builder.WriteString("\n")
+		} else {
+			builder.WriteString(" ")
+		}
+	}
+	builder.WriteString(text)
+	if lastKind != nil {
+		*lastKind = kind
+	}
+}
+
+func splitMarkdownFrontmatter(lines []string) (string, string, []string) {
+	if len(lines) == 0 || strings.TrimSpace(lines[0]) != "---" {
+		return "", "", lines
+	}
+	var name string
+	var description string
+	for i := 1; i < len(lines); i++ {
+		line := strings.TrimSpace(lines[i])
+		if line == "---" {
+			return name, description, lines[i+1:]
+		}
+		switch {
+		case strings.HasPrefix(line, "name:"):
+			name = strings.TrimSpace(strings.TrimPrefix(line, "name:"))
+		case strings.HasPrefix(line, "description:"):
+			description = strings.TrimSpace(strings.TrimPrefix(line, "description:"))
+		}
+	}
+	return "", "", lines
 }

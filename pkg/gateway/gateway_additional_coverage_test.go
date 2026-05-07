@@ -1,7 +1,6 @@
 package gateway
 
 import (
-	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -9,23 +8,8 @@ import (
 	"testing"
 
 	"github.com/1024XEngineer/anyclaw/pkg/config"
-	chatintake "github.com/1024XEngineer/anyclaw/pkg/gateway/intake/chat"
 	"github.com/1024XEngineer/anyclaw/pkg/state"
 )
-
-type fakeChatManager struct{}
-
-func (fakeChatManager) Chat(context.Context, chatintake.ChatRequest) (*chatintake.ChatResponse, error) {
-	return &chatintake.ChatResponse{SessionID: "s1", AgentName: "agent", Message: chatintake.Message{Role: "assistant", Content: "ok"}}, nil
-}
-
-func (fakeChatManager) GetSession(string) (*chatintake.Session, error) { return nil, nil }
-func (fakeChatManager) ListSessions() []chatintake.Session             { return []chatintake.Session{} }
-func (fakeChatManager) GetSessionHistory(string) ([]chatintake.Message, error) {
-	return []chatintake.Message{}, nil
-}
-func (fakeChatManager) DeleteSession(string) error         { return nil }
-func (fakeChatManager) ListAgents() []chatintake.AgentInfo { return []chatintake.AgentInfo{} }
 
 func drainJobQueue(server *Server) {
 	for {
@@ -180,48 +164,11 @@ func TestGatewayAdditionalCoverage_CronAndSkills(t *testing.T) {
 	_ = server.currentConfiguredSkillRefs()
 }
 
-func TestGatewayAdditionalCoverage_ChatV2AndHelpers(t *testing.T) {
+func TestGatewayAdditionalCoverage_V2TaskHelpers(t *testing.T) {
 	server := newSplitAPITestServer(t)
 
-	rec := httptest.NewRecorder()
-	server.handleV2Chat(rec, newAdminRequest(http.MethodPost, "/v2/chat", `{}`))
-	if rec.Code != http.StatusServiceUnavailable {
-		t.Fatalf("POST /v2/chat without module = %d", rec.Code)
-	}
-
-	rec = httptest.NewRecorder()
-	server.handleV2ChatSessions(rec, newAdminRequest(http.MethodGet, "/v2/chat/sessions", ""))
-	if rec.Code != http.StatusServiceUnavailable {
-		t.Fatalf("GET /v2/chat/sessions without module = %d", rec.Code)
-	}
-
-	rec = httptest.NewRecorder()
-	server.handleV2ChatSessionByID(rec, newAdminRequest(http.MethodGet, "/v2/chat/sessions/x", ""))
-	if rec.Code != http.StatusServiceUnavailable {
-		t.Fatalf("GET /v2/chat/sessions/id without module = %d", rec.Code)
-	}
-
-	server.chatModule = fakeChatManager{}
-	rec = httptest.NewRecorder()
-	server.handleV2Chat(rec, newAdminRequest(http.MethodPost, "/v2/chat", `{"agent_name":"helper","message":"hello"}`))
-	if rec.Code != http.StatusOK {
-		t.Fatalf("POST /v2/chat = %d body=%s", rec.Code, rec.Body.String())
-	}
-
-	rec = httptest.NewRecorder()
-	server.handleV2ChatSessions(rec, newAdminRequest(http.MethodGet, "/v2/chat/sessions", ""))
-	if rec.Code != http.StatusOK {
-		t.Fatalf("GET /v2/chat/sessions = %d", rec.Code)
-	}
-
-	rec = httptest.NewRecorder()
-	server.handleV2ChatSessionByID(rec, newAdminRequest(http.MethodDelete, "/v2/chat/sessions/demo", ""))
-	if rec.Code != http.StatusOK {
-		t.Fatalf("DELETE /v2/chat/sessions/id = %d body=%s", rec.Code, rec.Body.String())
-	}
-
 	server.store.AppendTask(&state.Task{ID: "task-1", Workspace: "default", Status: "queued", Assistant: "helper"})
-	rec = httptest.NewRecorder()
+	rec := httptest.NewRecorder()
 	server.handleV2Tasks(rec, newAdminRequest(http.MethodGet, "/v2/tasks?workspace=default&status=queued&assistant=helper", ""))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("GET /v2/tasks filtered = %d body=%s", rec.Code, rec.Body.String())

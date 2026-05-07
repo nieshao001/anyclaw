@@ -1,6 +1,7 @@
 package prompt
 
 import (
+	"encoding/xml"
 	"fmt"
 	"strings"
 	"text/template"
@@ -331,6 +332,9 @@ func (b *SystemPromptBuilder) buildMemory(data PromptData) string {
 }
 
 func (b *SystemPromptBuilder) buildSkills(data PromptData) string {
+	if len(data.AvailableSkills) > 0 {
+		return b.buildAvailableSkills(data.AvailableSkills)
+	}
 	if len(data.SkillPrompts) == 0 {
 		return ""
 	}
@@ -341,6 +345,43 @@ func (b *SystemPromptBuilder) buildSkills(data PromptData) string {
 		parts = append(parts, prompt)
 	}
 	return strings.Join(parts, "\n\n")
+}
+
+func (b *SystemPromptBuilder) buildAvailableSkills(skills []AvailableSkill) string {
+	lines := []string{
+		"## Skills (mandatory)",
+		"Before replying: scan <available_skills> <description> entries.",
+		"- If exactly one skill clearly applies: read its file at <location> with `read`, then follow it. You MUST use the exact <location> value from <available_skills>; never guess, fabricate, or hard-code a skill file path.",
+		"- If multiple could apply: choose the most specific one, read its file at <location> with `read`, then follow it. You MUST use the exact <location> value from <available_skills>; never guess, fabricate, or hard-code a skill file path.",
+		"- If none clearly apply: do not read any skill file.",
+		"Constraints: never read more than one skill up front; only read after selecting.",
+		"- When a skill drives external API writes, assume rate limits: prefer fewer larger writes, avoid tight one-item loops, serialize bursts when possible, and respect 429/Retry-After.",
+		"The following skills provide specialized instructions for specific tasks.",
+		"Use the read tool to load a skill's file when the task matches its description.",
+		"When a skill file references a relative path, resolve it against the skill directory (parent of SKILL.md / dirname of the path) and use that absolute path in tool commands.",
+		"<available_skills>",
+	}
+
+	for _, skill := range skills {
+		name := strings.TrimSpace(skill.Name)
+		location := strings.TrimSpace(skill.Location)
+		if name == "" || location == "" {
+			continue
+		}
+		description := strings.TrimSpace(skill.Description)
+		if description == "" {
+			description = "Specialized AnyClaw skill."
+		}
+		lines = append(lines,
+			"  <skill>",
+			"    <name>"+escapeXMLText(name)+"</name>",
+			"    <description>"+escapeXMLText(description)+"</description>",
+			"    <location>"+escapeXMLText(location)+"</location>",
+			"  </skill>",
+		)
+	}
+	lines = append(lines, "</available_skills>")
+	return strings.Join(lines, "\n")
 }
 
 func (b *SystemPromptBuilder) buildGuidelines() string {
@@ -402,20 +443,35 @@ func minInt(a, b int) int {
 	return b
 }
 
+func escapeXMLText(value string) string {
+	var builder strings.Builder
+	if err := xml.EscapeText(&builder, []byte(value)); err != nil {
+		return value
+	}
+	return builder.String()
+}
+
 type PromptData struct {
-	Name           string
-	Description    string
-	SystemPrompt   string
-	Personality    string
-	WorkingDir     string
-	Memory         string
-	Skills         []string
-	SkillPrompts   []string
-	Tools          []ToolInfo
-	CLIHub         *CLIHubInfo
-	ClawBridge     *ClawBridgeInfo
-	WorkspaceFiles []WorkspaceFile
-	History        []Message
+	Name            string
+	Description     string
+	SystemPrompt    string
+	Personality     string
+	WorkingDir      string
+	Memory          string
+	Skills          []string
+	SkillPrompts    []string
+	AvailableSkills []AvailableSkill
+	Tools           []ToolInfo
+	CLIHub          *CLIHubInfo
+	ClawBridge      *ClawBridgeInfo
+	WorkspaceFiles  []WorkspaceFile
+	History         []Message
+}
+
+type AvailableSkill struct {
+	Name        string
+	Description string
+	Location    string
 }
 
 type WorkspaceFile struct {
