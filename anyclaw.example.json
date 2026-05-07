@@ -40,12 +40,6 @@
     "behavior_style": "concise",
     "constraints": ""
   },
-  "permissions": {
-    "sandbox_mode": "workspace-write",
-    "approval_policy": "on-request",
-    "network_access": "enabled",
-    "desktop_access": "ask-once-per-session"
-  },
   "providers": [
     {
       "id": "primary-openai",

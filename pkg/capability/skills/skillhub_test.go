@@ -108,7 +108,9 @@ func TestSkillhubErrorPathsAndHelpers(t *testing.T) {
 		t.Fatal("expected missing SKILL.md error")
 	}
 
-	def := buildSkillhubFileDefinition(filepath.Join(t.TempDir(), "fallback"), "plain text only")
+	def := buildMarkdownSkillFileDefinition("plain text only", "fallback", nil)
+	def.Source = "skillhub"
+	def.Registry = "skillhub"
 	if def.Name == "" || def.Description == "" || def.Prompts["system"] == "" {
 		t.Fatalf("unexpected fallback definition: %#v", def)
 	}

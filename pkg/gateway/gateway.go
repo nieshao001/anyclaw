@@ -15,7 +15,6 @@ import (
 	"github.com/1024XEngineer/anyclaw/pkg/extensions/mcp"
 	"github.com/1024XEngineer/anyclaw/pkg/extensions/plugin"
 	appsecurity "github.com/1024XEngineer/anyclaw/pkg/gateway/auth/security"
-	"github.com/1024XEngineer/anyclaw/pkg/gateway/intake/chat"
 	gatewaymiddleware "github.com/1024XEngineer/anyclaw/pkg/gateway/middleware"
 	"github.com/1024XEngineer/anyclaw/pkg/gateway/resources/discovery"
 	nodepkg "github.com/1024XEngineer/anyclaw/pkg/gateway/resources/nodes"
@@ -48,7 +47,6 @@ type Server struct {
 	runtimePool    *runtime.RuntimePool
 	sessionRunner  *sessionrunner.Manager
 	tasks          *taskrunner.Manager
-	chatModule     chat.ChatManager
 	storeModule    agentstore.StoreManager
 	approvals      *state.ApprovalManager
 	auth           *authMiddleware

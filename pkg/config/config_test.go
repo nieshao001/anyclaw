@@ -282,6 +282,33 @@ func TestExampleConfigPreservesSecureDefaults(t *testing.T) {
 	}
 }
 
+func TestExampleConfigUsesKnownTopLevelFields(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join("..", "..", "anyclaw.example.json"))
+	if err != nil {
+		t.Fatalf("read example config: %v", err)
+	}
+
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
+		t.Fatalf("parse example config: %v", err)
+	}
+
+	known := make(map[string]bool)
+	configType := reflect.TypeOf(Config{})
+	for i := 0; i < configType.NumField(); i++ {
+		name := strings.Split(configType.Field(i).Tag.Get("json"), ",")[0]
+		if name != "" && name != "-" {
+			known[name] = true
+		}
+	}
+
+	for key := range raw {
+		if !known[key] {
+			t.Fatalf("example config uses unsupported top-level field %q", key)
+		}
+	}
+}
+
 func TestLoadInvalidJSON(t *testing.T) {
 	clearConfigEnv(t)
 
