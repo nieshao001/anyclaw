@@ -1,5 +1,6 @@
 import {
   Check,
+  ChevronRight,
   CircleUserRound,
   Clock3,
   FileText,
@@ -12,7 +13,7 @@ import {
   Sparkles,
   X,
 } from "lucide-react";
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import { NavLink } from "react-router-dom";
 
 import { MarkdownMessage } from "@/features/chat/MarkdownMessage";
@@ -59,6 +60,118 @@ function formatMessageTime(value: string) {
   });
 }
 
+function formatTaskDuration(ms: number) {
+  if (!Number.isFinite(ms) || ms < 0) return "";
+
+  const totalSeconds = Math.max(1, Math.round(ms / 1000));
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  const hours = Math.floor(minutes / 60);
+  const remainingMinutes = minutes % 60;
+
+  if (hours > 0) {
+    return `${hours}h ${remainingMinutes}m ${seconds}s`;
+  }
+
+  if (minutes > 0) {
+    return `${minutes}m ${seconds}s`;
+  }
+
+  return `${seconds}s`;
+}
+
+function getMessageTimeValue(value: string) {
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? null : date.getTime();
+}
+
+function taskDurationFromMessages(messages: { role: "assistant" | "user"; timestamp: string }[], index: number) {
+  const assistantTime = getMessageTimeValue(messages[index]?.timestamp ?? "");
+  if (assistantTime === null) return "";
+
+  for (let i = index - 1; i >= 0; i -= 1) {
+    if (messages[i]?.role !== "user") continue;
+    const userTime = getMessageTimeValue(messages[i].timestamp);
+    if (userTime === null) continue;
+    return formatTaskDuration(assistantTime - userTime);
+  }
+
+  return "";
+}
+
+function isCodexTaskSummary(content: string) {
+  const normalized = content.trim();
+  if (normalized === "") return false;
+
+  const startsWithHandled = /^已处理\s*[:：]/.test(normalized);
+  const hasVerified = /已验证\s*[:：]/.test(normalized);
+  const hasBlocked = /未确认\/阻塞\s*[:：]/.test(normalized);
+  const hasSupplement = /补充信息\s*[:：]/.test(normalized);
+
+  return (
+    startsWithHandled &&
+    (hasVerified || hasBlocked || hasSupplement || /^已处理\s*[:：]\s*[\r\n]/.test(normalized))
+  );
+}
+
+function extractCodexTaskSummaryLine(content: string) {
+  const normalized = content.replace(/\r\n/g, "\n").trim();
+  const handledMatch = normalized.match(/已处理\s*[:：]\s*([\s\S]*?)(?:\n\s*已验证\s*[:：]|\n\s*未确认\/阻塞\s*[:：]|\n\s*补充信息\s*[:：]|$)/);
+  if (!handledMatch) return "完成了。";
+
+  const firstHandledLine = handledMatch[1]
+    .split("\n")
+    .map((line) => line.replace(/^[-*]\s*/, "").trim())
+    .find((line) => line.length > 0);
+
+  if (!firstHandledLine) return "完成了。";
+  return firstHandledLine.startsWith("已") ? `${firstHandledLine}` : `完成了：${firstHandledLine}`;
+}
+
+function CodexTurnStatus({
+  content,
+  duration,
+  showContentWhenCollapsed,
+  summary,
+  expanded,
+  onToggle,
+}: {
+  content: string;
+  duration: string;
+  showContentWhenCollapsed: boolean;
+  summary: string | null;
+  expanded: boolean;
+  onToggle: () => void;
+}) {
+  const showContent = expanded || showContentWhenCollapsed;
+
+  return (
+    <div className="min-w-0">
+      {summary ? <div className="break-words text-[15px] leading-7 text-[#1f2937]">{summary}</div> : null}
+      <button
+        aria-expanded={expanded}
+        className="group mt-1 inline-flex h-8 items-center gap-1.5 rounded-[8px] px-0 text-[13px] font-medium text-[#667085] transition-colors duration-150 hover:text-[#1f2937]"
+        onClick={onToggle}
+        type="button"
+      >
+        <span>{duration ? `已处理 ${duration}` : "已处理"}</span>
+        <ChevronRight
+          aria-hidden="true"
+          className={["transition-transform duration-150", expanded ? "rotate-90" : ""].join(" ")}
+          size={15}
+          strokeWidth={2.2}
+        />
+      </button>
+
+      {showContent ? (
+        <div className="mt-2.5 break-words text-[15px] leading-[1.9] text-[#1f2937]">
+          <MarkdownMessage content={content} />
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 function ThinkingIndicator({ activeAgentLabel }: { activeAgentLabel: string }) {
   return (
     <div className="max-w-[680px] pt-1">
@@ -66,7 +179,7 @@ function ThinkingIndicator({ activeAgentLabel }: { activeAgentLabel: string }) {
         <span className="font-medium text-[#4b5563]">{activeAgentLabel}</span>
         <span className="inline-flex items-center gap-2 text-[#667085]">
           <Sparkles size={14} strokeWidth={2.1} />
-          <span>正在思考</span>
+          <span>正在处理任务</span>
           <span aria-hidden="true" className="thinking-dots">
             <span className="thinking-dot" />
             <span className="thinking-dot" />
@@ -484,6 +597,7 @@ export function ChatHomePage() {
   const autoScrollOnNextRenderRef = useRef(false);
   const scrollFadeTimerRef = useRef<number | null>(null);
   const setupPromptedRef = useRef(false);
+  const [expandedTaskResults, setExpandedTaskResults] = useState<Record<string, boolean>>({});
 
   useEffect(() => {
     if (!requiresModelSetup || setupPromptedRef.current) return;
@@ -607,11 +721,15 @@ export function ChatHomePage() {
               <div className="space-y-8 pb-16 pt-3 sm:space-y-10">
                 {messages.map((message, index) => {
                   const isUser = message.role === "user";
+                  const messageKey = `${message.role}:${message.timestamp}:${index}`;
+                  const isTaskSummary = !isUser && isCodexTaskSummary(message.content);
+                  const taskDuration = !isUser ? taskDurationFromMessages(messages, index) : "";
+                  const taskSummaryLine = isTaskSummary ? extractCodexTaskSummaryLine(message.content) : null;
 
                   return (
                     <div
                       className={isUser ? "ml-auto flex max-w-[300px] flex-col items-end md:max-w-[360px]" : "max-w-[680px]"}
-                      key={`${message.role}:${message.timestamp}:${index}`}
+                      key={messageKey}
                     >
                       {isUser ? (
                         <div className="rounded-[18px] bg-[#fcf1f1] px-4 py-3 text-[15px] leading-7 text-[#1f2937]">
@@ -623,8 +741,20 @@ export function ChatHomePage() {
                             <span className="font-medium text-[#4b5563]">{message.agent_name || activeAgentLabel}</span>
                             <span>{formatMessageTime(message.timestamp)}</span>
                           </div>
-                          <div className="mt-2.5 break-words text-[15px] leading-[1.9] text-[#1f2937]">
-                            <MarkdownMessage content={message.content} />
+                          <div className="mt-1.5">
+                            <CodexTurnStatus
+                              content={message.content}
+                              duration={taskDuration}
+                              expanded={Boolean(expandedTaskResults[messageKey])}
+                              onToggle={() => {
+                                setExpandedTaskResults((current) => ({
+                                  ...current,
+                                  [messageKey]: !current[messageKey],
+                                }));
+                              }}
+                              showContentWhenCollapsed={!isTaskSummary}
+                              summary={taskSummaryLine}
+                            />
                           </div>
                         </div>
                       )}

@@ -972,9 +972,9 @@
           case "offline":
             return "离线";
           case "thinking":
-            return "思考";
+            return "处理";
           case "executing":
-            return "执行中";
+            return "处理中";
           case "waiting":
             return "待确认";
           case "complete":
@@ -1004,9 +1004,9 @@
           case "offline":
             return "工作台暂时离线";
           case "thinking":
-            return "正在整理上下文";
+            return "正在处理任务";
           case "executing":
-            return "正在执行任务";
+            return "正在处理任务";
           case "waiting":
             return "等待你的确认";
           case "complete":
@@ -1031,12 +1031,12 @@
             return "桌面壳还在，但本地网关暂时没有连上。";
           case "thinking":
             return activeSessions > 0
-              ? `正在整理 ${activeSessions} 个会话的上下文。`
-              : "正在整理当前任务的上下文。";
+              ? `正在处理 ${activeSessions} 个会话，完成后会显示已处理和已验证信息。`
+              : "正在处理当前任务，完成后会显示已处理和已验证信息。";
           case "executing":
             return activeTasks > 0
-              ? `有 ${activeTasks} 个任务正在执行。`
-              : "正在替你继续当前任务。";
+              ? `有 ${activeTasks} 个任务正在处理。`
+              : "正在继续处理当前任务。";
           case "waiting":
             return pendingApprovals > 0
               ? `有 ${pendingApprovals} 个步骤在等你确认。`
@@ -1073,9 +1073,9 @@
           case "offline":
             return "离线";
           case "thinking":
-            return "思考";
+            return "处理";
           case "executing":
-            return "执行";
+            return "处理";
           case "waiting":
             return "确认";
           case "complete":
@@ -1122,9 +1122,9 @@
           case "offline":
             return "本地网关暂时离线";
           case "thinking":
-            return sessions > 0 ? `正在整理 ${sessions} 个会话` : "正在整理当前上下文";
+            return sessions > 0 ? `正在处理 ${sessions} 个会话` : "正在处理当前任务";
           case "executing":
-            return tasks > 0 ? `${tasks} 个任务执行中` : "正在继续当前任务";
+            return tasks > 0 ? `${tasks} 个任务处理中` : "正在继续当前任务";
           case "waiting":
             return approvals > 0 ? `${approvals} 个步骤待确认` : "有一步在等你确认";
           case "complete":
@@ -1176,6 +1176,22 @@
         }
 
         return engineForSnapshot(snapshot) || "工作台待命";
+      }
+
+      function withCacheBust(url) {
+        const raw = `${url || ""}`.trim();
+        if (!raw) {
+          return raw;
+        }
+
+        try {
+          const parsed = new URL(raw, window.location.href);
+          parsed.searchParams.set("_anyclaw_ui", `${Date.now()}`);
+          return parsed.toString();
+        } catch {
+          const separator = raw.includes("?") ? "&" : "?";
+          return `${raw}${separator}_anyclaw_ui=${Date.now()}`;
+        }
       }
 
       function shouldStayExpanded() {
@@ -1377,7 +1393,7 @@
             throw new Error("桌面壳没有返回可用的 Dashboard 地址。");
           }
 
-          dashboardFrame.src = state.dashboardURL;
+          dashboardFrame.src = withCacheBust(state.dashboardURL);
           showOverlay(
             result.attached ? "已连接本地工作台" : "网关已启动",
             result.attached ? "检测到已存在本地实例，正在切换到 Dashboard。" : "本地网关已经就绪，正在载入 Dashboard。",

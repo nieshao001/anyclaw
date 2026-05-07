@@ -628,6 +628,10 @@ func ensureDesktopConfig(configPath string, bundleRoot string) error {
 		cfg.Sandbox.ExecutionMode = "host-reviewed"
 		changed = true
 	}
+	if strings.TrimSpace(cfg.Permissions.DesktopAccess) != "ask-once-per-session" {
+		cfg.Permissions.DesktopAccess = "ask-once-per-session"
+		changed = true
+	}
 
 	if bundleRoot != "" {
 		if skillsDir := filepath.Join(bundleRoot, "skills"); pathExists(skillsDir) && cfg.Skills.Dir != skillsDir {
