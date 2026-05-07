@@ -87,16 +87,8 @@ func TestNewTargetAppAppliesAgentProfileProviderAndPreservesWorkspaceOverride(t 
 	if app.WorkingDir != absWorkspacePath {
 		t.Fatalf("expected working dir %q, got %q", absWorkspacePath, app.WorkingDir)
 	}
-	for _, name := range []string{"AGENTS.md", "SOUL.md", "TOOLS.md", "IDENTITY.md", "USER.md", "HEARTBEAT.md", "MEMORY.md"} {
-		if _, err := os.Stat(filepath.Join(absWorkspacePath, name)); err != nil {
-			t.Fatalf("expected bootstrap file %s to exist: %v", name, err)
-		}
-	}
-	if _, err := os.Stat(filepath.Join(absWorkspacePath, "BOOTSTRAP.md")); err != nil {
-		t.Fatalf("expected BOOTSTRAP.md to exist for a new workspace: %v", err)
-	}
-	if _, err := os.Stat(filepath.Join(absWorkspacePath, "memory")); err != nil {
-		t.Fatalf("expected memory directory to exist: %v", err)
+	if _, err := os.Stat(filepath.Join(absWorkspacePath, "AGENTS.md")); err != nil {
+		t.Fatalf("expected AGENTS.md to exist: %v", err)
 	}
 	if err := app.Memory.Add(memory.MemoryEntry{
 		ID:        "fact-1",
@@ -106,8 +98,9 @@ func TestNewTargetAppAppliesAgentProfileProviderAndPreservesWorkspaceOverride(t 
 	}); err != nil {
 		t.Fatalf("app.Memory.Add: %v", err)
 	}
-	if _, err := os.Stat(filepath.Join(absWorkspacePath, "memory", "2026-03-29.md")); err != nil {
-		t.Fatalf("expected daily workspace memory file to exist: %v", err)
+	dailyPath := filepath.Join(app.WorkDir, "memory", "workspaces", memory.CodexMemoryWorkspaceName(absWorkspacePath), "daily", "2026-03-29.md")
+	if _, err := os.Stat(dailyPath); err != nil {
+		t.Fatalf("expected codex daily workspace memory file to exist: %v", err)
 	}
 }
 
@@ -215,6 +208,15 @@ func TestNewTargetAppAutoCompletesBootstrapWhenAgentProfileAlreadyConfigured(t *
 			t.Fatalf("MkdirAll(%q): %v", dir, err)
 		}
 	}
+	if err := os.MkdirAll(filepath.Join(cfg.Agent.WorkingDir, "memory"), 0o755); err != nil {
+		t.Fatalf("MkdirAll(working memory): %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(cfg.Agent.WorkingDir, "BOOTSTRAP.md"), []byte("user bootstrap"), 0o644); err != nil {
+		t.Fatalf("WriteFile(BOOTSTRAP.md): %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(cfg.Agent.WorkingDir, "memory", "2026-05-06.md"), []byte("user memory"), 0o644); err != nil {
+		t.Fatalf("WriteFile(memory): %v", err)
+	}
 
 	app, err := NewTargetApp(configPath, "", "")
 	if err != nil {
@@ -222,28 +224,35 @@ func TestNewTargetAppAutoCompletesBootstrapWhenAgentProfileAlreadyConfigured(t *
 	}
 	t.Cleanup(func() { _ = app.Close() })
 
-	if _, err := os.Stat(filepath.Join(app.WorkingDir, "BOOTSTRAP.md")); !os.IsNotExist(err) {
-		t.Fatalf("expected BOOTSTRAP.md to be removed for configured workspace, stat err=%v", err)
+	bootstrapData, err := os.ReadFile(filepath.Join(app.WorkingDir, "BOOTSTRAP.md"))
+	if err != nil {
+		t.Fatalf("ReadFile(BOOTSTRAP.md): %v", err)
+	}
+	if string(bootstrapData) != "user bootstrap" {
+		t.Fatalf("expected BOOTSTRAP.md to be preserved, got %q", string(bootstrapData))
+	}
+	memoryData, err := os.ReadFile(filepath.Join(app.WorkingDir, "memory", "2026-05-06.md"))
+	if err != nil {
+		t.Fatalf("ReadFile(memory): %v", err)
+	}
+	if string(memoryData) != "user memory" {
+		t.Fatalf("expected workspace memory to be preserved, got %q", string(memoryData))
 	}
 
-	userData, err := os.ReadFile(filepath.Join(app.WorkingDir, "USER.md"))
+	agentsData, err := os.ReadFile(filepath.Join(app.WorkingDir, "AGENTS.md"))
 	if err != nil {
-		t.Fatalf("ReadFile(USER.md): %v", err)
+		t.Fatalf("ReadFile(AGENTS.md): %v", err)
 	}
-	if !strings.Contains(string(userData), "Default language: zh-CN") {
-		t.Fatalf("expected USER.md to include configured language, got %q", string(userData))
+	agentsText := string(agentsData)
+	if !strings.Contains(agentsText, "Default language: zh-CN") {
+		t.Fatalf("expected AGENTS.md to include configured language, got %q", agentsText)
 	}
 
-	identityData, err := os.ReadFile(filepath.Join(app.WorkingDir, "IDENTITY.md"))
-	if err != nil {
-		t.Fatalf("ReadFile(IDENTITY.md): %v", err)
+	if !strings.Contains(agentsText, "本地编码与项目维护") {
+		t.Fatalf("expected AGENTS.md to include configured work focus, got %q", agentsText)
 	}
-	identityText := string(identityData)
-	if !strings.Contains(identityText, "本地编码与项目维护") {
-		t.Fatalf("expected IDENTITY.md to include configured work focus, got %q", identityText)
-	}
-	if !strings.Contains(identityText, "简洁、主动、中文优先") {
-		t.Fatalf("expected IDENTITY.md to include configured behavior style, got %q", identityText)
+	if !strings.Contains(agentsText, "简洁、主动、中文优先") {
+		t.Fatalf("expected AGENTS.md to include configured behavior style, got %q", agentsText)
 	}
 }
 

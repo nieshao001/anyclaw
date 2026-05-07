@@ -326,9 +326,9 @@ func (m *ModularConfigManager) applyRuntimeOverrides(config *Config) *Config {
 			if v, ok := value.(float64); ok {
 				config.LLM.Temperature = v
 			}
-		case "agent.permission_level":
+		case "permissions.sandbox_mode":
 			if v, ok := value.(string); ok {
-				config.Agent.PermissionLevel = v
+				config.Permissions.SandboxMode = v
 			}
 		}
 	}
@@ -360,13 +360,13 @@ func (m *ModularConfigManager) validateConfig(config *Config) error {
 	}
 
 	// 验证权限级别
-	validPermissionLevels := map[string]bool{
-		"read-only": true,
-		"limited":   true,
-		"full":      true,
+	validSandboxModes := map[string]bool{
+		"read-only":          true,
+		"workspace-write":    true,
+		"danger-full-access": true,
 	}
-	if !validPermissionLevels[config.Agent.PermissionLevel] {
-		errors = append(errors, "agent.permission_level must be one of: read-only, limited, full")
+	if !validSandboxModes[config.Permissions.SandboxMode] {
+		errors = append(errors, "permissions.sandbox_mode must be one of: read-only, workspace-write, danger-full-access")
 	}
 
 	if len(errors) > 0 {

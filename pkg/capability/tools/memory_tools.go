@@ -3,7 +3,6 @@ package tools
 import (
 	"context"
 	"fmt"
-	"path/filepath"
 	"strings"
 	"time"
 
@@ -15,6 +14,10 @@ func MemorySearchToolWithCwd(ctx context.Context, input map[string]any, cwd stri
 }
 
 func MemorySearchToolWithBackend(ctx context.Context, input map[string]any, cwd string, mem MemoryBackend) (string, error) {
+	return MemorySearchToolWithBackendAndDailyDir(ctx, input, cwd, mem, "")
+}
+
+func MemorySearchToolWithBackendAndDailyDir(ctx context.Context, input map[string]any, cwd string, mem MemoryBackend, dailyDir string) (string, error) {
 	query, ok := input["query"].(string)
 	if !ok || strings.TrimSpace(query) == "" {
 		return "", fmt.Errorf("query is required")
@@ -43,7 +46,7 @@ func MemorySearchToolWithBackend(ctx context.Context, input map[string]any, cwd 
 	}
 
 	day, _ := input["date"].(string)
-	matches, err := appmemory.SearchDailyMarkdown(dailyMemoryDir(cwd), query, limit, day)
+	matches, err := appmemory.SearchDailyMarkdown(resolveDailyMemoryDir(cwd, mem, dailyDir), query, limit, day)
 	if err != nil {
 		return "", err
 	}
@@ -191,12 +194,27 @@ func MemoryHybridSearchTool(ctx context.Context, input map[string]any, mem Memor
 }
 
 func MemoryGetToolWithCwd(ctx context.Context, input map[string]any, cwd string) (string, error) {
-	day, ok := input["date"].(string)
-	if !ok || strings.TrimSpace(day) == "" {
-		return "", fmt.Errorf("date is required")
+	return MemoryGetToolWithDailyDir(ctx, input, cwd, nil, "")
+}
+
+func MemoryGetToolWithDailyDir(ctx context.Context, input map[string]any, cwd string, mem MemoryBackend, dailyDir string) (string, error) {
+	if id, _ := input["id"].(string); strings.TrimSpace(id) != "" {
+		if mem == nil {
+			return "", fmt.Errorf("memory backend not available")
+		}
+		entry, err := mem.Get(strings.TrimSpace(id))
+		if err != nil {
+			return "", err
+		}
+		return fmt.Sprintf("# Memory Entry %s\n\nType: %s\nTimestamp: %s\n\n%s", entry.ID, entry.Type, formatMemoryTimestamp(entry.Timestamp), strings.TrimSpace(entry.Content)), nil
 	}
 
-	file, err := appmemory.GetDailyMarkdown(dailyMemoryDir(cwd), day)
+	day, ok := input["date"].(string)
+	if !ok || strings.TrimSpace(day) == "" {
+		return "", fmt.Errorf("id or date is required")
+	}
+
+	file, err := appmemory.GetDailyMarkdown(resolveDailyMemoryDir(cwd, mem, dailyDir), day)
 	if err != nil {
 		return "", err
 	}
@@ -204,12 +222,16 @@ func MemoryGetToolWithCwd(ctx context.Context, input map[string]any, cwd string)
 	return fmt.Sprintf("# Daily Memory %s\nPath: %s\n\n%s", file.Date, file.Path, file.Content), nil
 }
 
-func dailyMemoryDir(cwd string) string {
-	cwd = strings.TrimSpace(cwd)
-	if cwd == "" {
-		cwd = "."
+func resolveDailyMemoryDir(cwd string, mem MemoryBackend, explicit string) string {
+	if explicit = strings.TrimSpace(explicit); explicit != "" {
+		return explicit
 	}
-	return filepath.Join(cwd, "memory")
+	if daily, ok := mem.(appmemory.DailyBackend); ok {
+		if dir := strings.TrimSpace(daily.DailyDir()); dir != "" {
+			return dir
+		}
+	}
+	return appmemory.CodexDailyMemoryDir(cwd)
 }
 
 func formatMemoryTimestamp(t time.Time) string {

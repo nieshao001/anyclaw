@@ -4,11 +4,14 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
+	"time"
 )
 
 type Config struct {
@@ -205,6 +208,116 @@ func (c *client) Name() string {
 	return c.provider
 }
 
+type RequestDiagnostics struct {
+	Provider          string
+	Model             string
+	BaseURL           string
+	Endpoint          string
+	MessageCount      int
+	ToolCount         int
+	RequestBytes      int
+	EstimatedTokens   int
+	Elapsed           time.Duration
+	DeadlineRemaining time.Duration
+}
+
+type RequestError struct {
+	Kind        string
+	Diagnostics RequestDiagnostics
+	Err         error
+}
+
+func (e *RequestError) Error() string {
+	if e == nil {
+		return ""
+	}
+	diag := e.Diagnostics
+	base := strings.TrimSpace(e.Kind)
+	if base == "" {
+		base = "LLM request failed"
+	}
+	detail := ""
+	if e.Err != nil {
+		detail = e.Err.Error()
+	}
+	return fmt.Sprintf("%s：provider=%s model=%s endpoint=%s messages=%d tools=%d request_bytes=%d estimated_tokens=%d elapsed=%s deadline_remaining=%s detail=%s",
+		base,
+		diag.Provider,
+		diag.Model,
+		diag.Endpoint,
+		diag.MessageCount,
+		diag.ToolCount,
+		diag.RequestBytes,
+		diag.EstimatedTokens,
+		diag.Elapsed.Round(time.Millisecond),
+		formatDurationForDiagnostics(diag.DeadlineRemaining),
+		detail,
+	)
+}
+
+func (e *RequestError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.Err
+}
+
+func (c *client) wrapRequestError(ctx context.Context, endpoint string, err error, body []byte, messages []Message, tools []ToolDefinition, elapsed time.Duration) error {
+	kind := "LLM 请求失败"
+	if isTimeoutError(ctx, err) {
+		kind = "模型请求超时"
+	}
+	return &RequestError{
+		Kind: kind,
+		Diagnostics: RequestDiagnostics{
+			Provider:          normalizeProvider(c.provider),
+			Model:             c.model,
+			BaseURL:           c.baseURL,
+			Endpoint:          endpoint,
+			MessageCount:      len(messages),
+			ToolCount:         len(tools),
+			RequestBytes:      len(body),
+			EstimatedTokens:   estimateRequestTokens(body),
+			Elapsed:           elapsed,
+			DeadlineRemaining: deadlineRemaining(ctx),
+		},
+		Err: err,
+	}
+}
+
+func isTimeoutError(ctx context.Context, err error) bool {
+	if errors.Is(err, context.DeadlineExceeded) || (ctx != nil && errors.Is(ctx.Err(), context.DeadlineExceeded)) {
+		return true
+	}
+	var netErr net.Error
+	return errors.As(err, &netErr) && netErr.Timeout()
+}
+
+func estimateRequestTokens(body []byte) int {
+	if len(body) == 0 {
+		return 0
+	}
+	return len(body)/4 + 1
+}
+
+func deadlineRemaining(ctx context.Context) time.Duration {
+	if ctx == nil {
+		return 0
+	}
+	deadline, ok := ctx.Deadline()
+	if !ok {
+		return 0
+	}
+	return time.Until(deadline)
+}
+
+func formatDurationForDiagnostics(value time.Duration) string {
+	if value == 0 {
+		return "none"
+	}
+	return value.Round(time.Millisecond).String()
+}
+
 func (c *client) Chat(ctx context.Context, messages []Message, tools []ToolDefinition) (*Response, error) {
 	provider := normalizeProvider(c.provider)
 	switch provider {
@@ -259,9 +372,10 @@ func (c *client) chatOpenAICompatible(ctx context.Context, messages []Message, t
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+c.apiKey)
 
+	start := time.Now()
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return nil, err
+		return nil, c.wrapRequestError(ctx, "chat/completions", err, body, messages, tools, time.Since(start))
 	}
 	defer resp.Body.Close()
 
@@ -335,9 +449,10 @@ func (c *client) streamOpenAICompatibleResponse(ctx context.Context, messages []
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+c.apiKey)
 
+	start := time.Now()
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return nil, err
+		return nil, c.wrapRequestError(ctx, "chat/completions stream", err, body, messages, tools, time.Since(start))
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
@@ -509,9 +624,10 @@ func (c *client) streamAnthropicResponse(ctx context.Context, messages []Message
 	req.Header.Set("x-api-key", c.apiKey)
 	req.Header.Set("anthropic-version", "2023-06-01")
 
+	start := time.Now()
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return nil, err
+		return nil, c.wrapRequestError(ctx, "messages stream", err, body, messages, tools, time.Since(start))
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
@@ -615,9 +731,10 @@ func (c *client) chatAnthropic(ctx context.Context, messages []Message, tools []
 	req.Header.Set("x-api-key", c.apiKey)
 	req.Header.Set("anthropic-version", "2023-06-01")
 
+	start := time.Now()
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return nil, err
+		return nil, c.wrapRequestError(ctx, "messages", err, body, messages, tools, time.Since(start))
 	}
 	defer resp.Body.Close()
 

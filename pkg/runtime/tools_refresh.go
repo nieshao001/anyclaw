@@ -2,15 +2,17 @@ package runtime
 
 import (
 	"fmt"
+	"path/filepath"
 	"strings"
 
 	"github.com/1024XEngineer/anyclaw/pkg/capability/skills"
 	"github.com/1024XEngineer/anyclaw/pkg/capability/tools"
+	"github.com/1024XEngineer/anyclaw/pkg/state/memory"
 )
 
 // RefreshToolRegistry rebuilds tools that capture runtime config such as
-// permission_level and sandbox mode. It intentionally leaves LLM, memory, and
-// plugin lifecycle untouched.
+// sandbox, approval, and network permissions. It intentionally leaves LLM,
+// memory, and plugin lifecycle untouched.
 func (a *MainRuntime) RefreshToolRegistry() error {
 	if a == nil || a.Config == nil {
 		return fmt.Errorf("runtime config is unavailable")
@@ -30,12 +32,21 @@ func (a *MainRuntime) RefreshToolRegistry() error {
 			workingDir = profile.WorkingDir
 		}
 	}
+	memoryWorkDir := memory.CodexMemoryWorkspaceDir(a.WorkDir, workingDir)
 
 	registry := tools.NewRegistry()
 	sandboxManager := tools.NewSandboxManager(a.Config.Sandbox, workingDir)
+	permissionOptions := tools.PermissionOptions{
+		SandboxMode:    a.Config.Permissions.SandboxMode,
+		ApprovalPolicy: a.Config.Permissions.ApprovalPolicy,
+		NetworkAccess:  a.Config.Permissions.NetworkAccess,
+		DesktopAccess:  a.Config.Permissions.DesktopAccess,
+	}
+	permissionEngine := tools.NewPermissionEngine(workingDir, permissionOptions)
 	policyEngine := tools.NewPolicyEngine(tools.PolicyOptions{
 		WorkingDir:           workingDir,
 		PermissionLevel:      a.Config.Agent.PermissionLevel,
+		Permissions:          permissionOptions,
 		ProtectedPaths:       a.Config.Security.ProtectedPaths,
 		AllowedReadPaths:     a.Config.Security.AllowedReadPaths,
 		AllowedWritePaths:    a.Config.Security.AllowedWritePaths,
@@ -53,13 +64,15 @@ func (a *MainRuntime) RefreshToolRegistry() error {
 	builtinOpts := tools.BuiltinOptions{
 		WorkingDir:            workingDir,
 		PermissionLevel:       a.Config.Agent.PermissionLevel,
-		ExecutionMode:         a.Config.Sandbox.ExecutionMode,
+		Permissions:           permissionOptions,
+		ExecutionMode:         runtimeExecutionMode(a.Config.Sandbox.ExecutionMode, sandboxManager),
 		DangerousPatterns:     a.Config.Security.DangerousCommandPatterns,
 		ProtectedPaths:        a.Config.Security.ProtectedPaths,
 		AllowedReadPaths:      a.Config.Security.AllowedReadPaths,
 		AllowedWritePaths:     a.Config.Security.AllowedWritePaths,
 		AllowedEgressDomains:  a.Config.Security.AllowedEgressDomains,
 		Policy:                policyEngine,
+		PermissionEngine:      permissionEngine,
 		CommandTimeoutSeconds: a.Config.Security.CommandTimeoutSeconds,
 		AuditLogger:           auditLogger,
 		Sandbox:               sandboxManager,
@@ -74,8 +87,9 @@ func (a *MainRuntime) RefreshToolRegistry() error {
 			AllowedApps:           a.Config.Computer.AllowedApps,
 			AllowedDomains:        a.Config.Computer.AllowedDomains,
 		},
-		MemoryBackend: a.Memory,
-		QMDClient:     qmdClient,
+		MemoryBackend:  a.Memory,
+		DailyMemoryDir: filepath.Join(memoryWorkDir, "daily"),
+		QMDClient:      qmdClient,
 	}
 	tools.RegisterBuiltins(registry, builtinOpts)
 	if a.Skills != nil {
@@ -97,4 +111,15 @@ func (a *MainRuntime) RefreshToolRegistry() error {
 		a.Orchestrator.SetToolOptions(builtinOpts, registry)
 	}
 	return nil
+}
+
+func runtimeExecutionMode(configured string, sandbox *tools.SandboxManager) string {
+	mode := strings.TrimSpace(strings.ToLower(configured))
+	if mode == "" {
+		mode = "sandbox"
+	}
+	if mode == "sandbox" && (sandbox == nil || !sandbox.Enabled()) {
+		return "host-reviewed"
+	}
+	return mode
 }

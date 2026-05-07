@@ -3,6 +3,7 @@ package config
 type Config struct {
 	LLM          LLMConfig          `json:"llm"`
 	Agent        AgentConfig        `json:"agent"`
+	Permissions  PermissionsConfig  `json:"permissions"`
 	Providers    []ProviderProfile  `json:"providers,omitempty"`
 	Skills       SkillsConfig       `json:"skills"`
 	Memory       MemoryConfig       `json:"memory"`
@@ -61,8 +62,8 @@ type AgentConfig struct {
 	Description                     string          `json:"description"`
 	WorkDir                         string          `json:"work_dir"`
 	WorkingDir                      string          `json:"working_dir"`
-	PermissionLevel                 string          `json:"permission_level"`
-	RequireConfirmationForDangerous bool            `json:"require_confirmation_for_dangerous"`
+	PermissionLevel                 string          `json:"-"`
+	RequireConfirmationForDangerous bool            `json:"-"`
 	Skills                          []AgentSkillRef `json:"skills,omitempty"`
 	Profiles                        []AgentProfile  `json:"profiles"`
 	ActiveProfile                   string          `json:"active_profile"`
@@ -70,6 +71,13 @@ type AgentConfig struct {
 	WorkFocus                       string          `json:"work_focus,omitempty"`
 	BehaviorStyle                   string          `json:"behavior_style,omitempty"`
 	Constraints                     string          `json:"constraints,omitempty"`
+}
+
+type PermissionsConfig struct {
+	SandboxMode    string `json:"sandbox_mode"`
+	ApprovalPolicy string `json:"approval_policy"`
+	NetworkAccess  string `json:"network_access"`
+	DesktopAccess  string `json:"desktop_access"`
 }
 
 type AgentProfile struct {
@@ -290,13 +298,13 @@ type SecurityConfig struct {
 	Users                    []SecurityUser `json:"users"`
 	Roles                    []SecurityRole `json:"roles"`
 	AuditLog                 string         `json:"audit_log"`
-	DangerousCommandPatterns []string       `json:"dangerous_command_patterns"`
-	ProtectedPaths           []string       `json:"protected_paths"`
-	AllowedReadPaths         []string       `json:"allowed_read_paths,omitempty"`
-	AllowedWritePaths        []string       `json:"allowed_write_paths,omitempty"`
-	AllowedEgressDomains     []string       `json:"allowed_egress_domains,omitempty"`
+	DangerousCommandPatterns []string       `json:"-"`
+	ProtectedPaths           []string       `json:"-"`
+	AllowedReadPaths         []string       `json:"-"`
+	AllowedWritePaths        []string       `json:"-"`
+	AllowedEgressDomains     []string       `json:"-"`
 	CommandTimeoutSeconds    int            `json:"command_timeout_seconds"`
-	DesktopApprovalScope     string         `json:"desktop_approval_scope,omitempty"`
+	DesktopApprovalScope     string         `json:"-"`
 	RiskAcknowledged         bool           `json:"risk_acknowledged"`
 	SecurityAudit            []string       `json:"security_audit,omitempty"`
 	PairingEnabled           bool           `json:"pairing_enabled"`

@@ -291,12 +291,11 @@ func (s *SkillsManager) RegisterTools(registry *tools.Registry, opts ExecutionOp
 		skill := skill
 		toolDef := skill.ToTool()
 		registry.Register(&tools.Tool{
-			Name:             toolDef.Name,
-			Description:      toolDef.Description,
-			InputSchema:      toolDef.InputSchema,
-			Category:         tools.ToolCategoryCustom,
-			AccessLevel:      tools.ToolAccessPublic,
-			RequiresApproval: true,
+			Name:        toolDef.Name,
+			Description: toolDef.Description,
+			InputSchema: toolDef.InputSchema,
+			Category:    tools.ToolCategoryCustom,
+			AccessLevel: tools.ToolAccessPublic,
 			Handler: func(ctx context.Context, input map[string]any) (string, error) {
 				if err := tools.RequestToolApproval(ctx, toolDef.Name, input); err != nil {
 					return "", err

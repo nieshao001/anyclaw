@@ -18,7 +18,7 @@ func runShellCommand(args []string) error {
 	command := fs.String("execute", "", "shell command to execute")
 	cwd := fs.String("cwd", "", "working directory override")
 	shellName := fs.String("shell", "auto", "shell to use: auto, cmd, powershell, pwsh, sh, or bash")
-	mode := fs.String("mode", "", "execution mode override: sandbox or host-reviewed")
+	sandboxMode := fs.String("sandbox-mode", "", "sandbox mode override: read-only, workspace-write, or danger-full-access")
 	timeoutSeconds := fs.Int("timeout", 0, "command timeout in seconds")
 	dryRun := fs.Bool("dry-run", false, "print the planned execution without running it")
 	if err := fs.Parse(args); err != nil {
@@ -34,8 +34,8 @@ func runShellCommand(args []string) error {
 	if err != nil {
 		return err
 	}
-	if override := strings.TrimSpace(*mode); override != "" {
-		cfg.Sandbox.ExecutionMode = override
+	if override := strings.TrimSpace(*sandboxMode); override != "" {
+		cfg.Permissions.SandboxMode = override
 	}
 	if *timeoutSeconds > 0 {
 		cfg.Security.CommandTimeoutSeconds = *timeoutSeconds
@@ -51,35 +51,27 @@ func runShellCommand(args []string) error {
 	}
 
 	if *dryRun {
-		fmt.Printf("Dry-run: would execute in %q with shell %q under mode %q: %s\n", firstNonEmptyShellDir(executionCwd, workingDir), *shellName, cfg.Sandbox.ExecutionMode, cmdStr)
+		fmt.Printf("Dry-run: would execute in %q with shell %q under sandbox %q: %s\n", firstNonEmptyShellDir(executionCwd, workingDir), *shellName, cfg.Permissions.SandboxMode, cmdStr)
 		return nil
 	}
 
 	sandboxManager := tools.NewSandboxManager(cfg.Sandbox, workingDir)
+	permissionOptions := tools.PermissionOptions{
+		SandboxMode:    cfg.Permissions.SandboxMode,
+		ApprovalPolicy: cfg.Permissions.ApprovalPolicy,
+		NetworkAccess:  cfg.Permissions.NetworkAccess,
+		DesktopAccess:  cfg.Permissions.DesktopAccess,
+	}
 	output, err := tools.RunCommandToolWithPolicy(context.Background(), map[string]any{
 		"command": cmdStr,
 		"cwd":     executionCwd,
 		"shell":   *shellName,
 	}, tools.BuiltinOptions{
 		WorkingDir:            workingDir,
-		PermissionLevel:       cfg.Agent.PermissionLevel,
-		ExecutionMode:         cfg.Sandbox.ExecutionMode,
-		DangerousPatterns:     cfg.Security.DangerousCommandPatterns,
-		ProtectedPaths:        cfg.Security.ProtectedPaths,
-		AllowedReadPaths:      cfg.Security.AllowedReadPaths,
-		AllowedWritePaths:     cfg.Security.AllowedWritePaths,
+		Permissions:           permissionOptions,
+		PermissionEngine:      tools.NewPermissionEngine(workingDir, permissionOptions),
 		CommandTimeoutSeconds: cfg.Security.CommandTimeoutSeconds,
 		Sandbox:               sandboxManager,
-		ConfirmDangerousCommand: func(command string) bool {
-			if !cfg.Agent.RequireConfirmationForDangerous {
-				return true
-			}
-			fmt.Printf("Dangerous command detected: %s\n", command)
-			fmt.Print("Execute anyway? (y/N): ")
-			var confirm string
-			_, _ = fmt.Scanln(&confirm)
-			return strings.EqualFold(strings.TrimSpace(confirm), "y")
-		},
 	})
 	if output != "" {
 		fmt.Print(output)

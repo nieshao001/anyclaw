@@ -114,6 +114,7 @@ var dangerousCommandPatterns = []string{
 type PolicyOptions struct {
 	WorkingDir           string
 	PermissionLevel      string
+	Permissions          PermissionOptions
 	ProtectedPaths       []string
 	AllowedReadPaths     []string
 	AllowedWritePaths    []string
@@ -123,6 +124,8 @@ type PolicyOptions struct {
 type PolicyEngine struct {
 	workingDir           string
 	permissionLevel      string
+	permissions          PermissionOptions
+	permissionEngine     *PermissionEngine
 	protectedPaths       []string
 	allowedReadPaths     []string
 	allowedWritePaths    []string
@@ -156,8 +159,10 @@ type RiskLabel struct {
 func NewPolicyEngine(opts PolicyOptions) *PolicyEngine {
 	engine := &PolicyEngine{
 		permissionLevel: strings.TrimSpace(strings.ToLower(opts.PermissionLevel)),
+		permissions:     NormalizePermissionOptions(opts.Permissions),
 	}
 	engine.workingDir = normalizePolicyPath(resolvePath(opts.WorkingDir, ""))
+	engine.permissionEngine = NewPermissionEngine(opts.WorkingDir, engine.permissions)
 	engine.protectedPaths = normalizePolicyPaths(opts.ProtectedPaths, opts.WorkingDir)
 	engine.allowedReadPaths = normalizePolicyPaths(opts.AllowedReadPaths, opts.WorkingDir)
 	engine.allowedWritePaths = normalizePolicyPaths(opts.AllowedWritePaths, opts.WorkingDir)
@@ -361,6 +366,11 @@ func (p *PolicyEngine) CheckWritePath(path string) error {
 	if strings.TrimSpace(strings.ToLower(p.permissionLevel)) == "read-only" {
 		return fmt.Errorf("permission denied: current agent is read-only")
 	}
+	if p != nil && p.permissionEngine != nil {
+		if result := p.permissionEngine.Decide(PermissionAction{Kind: "write", Path: path}); result.Decision == DecisionDeny {
+			return permissionDecisionError(result, "write")
+		}
+	}
 	return p.checkPathAccess(path, p.allowedWritePaths, "write")
 }
 
@@ -370,6 +380,11 @@ func (p *PolicyEngine) CheckCommandCwd(path string) error {
 	}
 	if strings.TrimSpace(strings.ToLower(p.permissionLevel)) == "read-only" {
 		return fmt.Errorf("permission denied: current agent is read-only")
+	}
+	if p != nil && p.permissionEngine != nil {
+		if result := p.permissionEngine.Decide(PermissionAction{Kind: "execute", CWD: path}); result.Decision == DecisionDeny {
+			return permissionDecisionError(result, "execute")
+		}
 	}
 	return p.checkPathAccess(path, p.allowedWritePaths, "execute")
 }
@@ -399,7 +414,20 @@ func (p *PolicyEngine) CheckEgressURL(targetURL string) error {
 			return nil
 		}
 	}
+	if p != nil && p.permissionEngine != nil {
+		if result := p.permissionEngine.Decide(PermissionAction{Kind: "network", URL: targetURL}); result.Decision == DecisionDeny {
+			return permissionDecisionError(result, "network")
+		}
+	}
 	return fmt.Errorf("egress denied: %s is not in security.allowed_egress_domains", host)
+}
+
+func permissionDecisionError(result PermissionResult, kind string) error {
+	reason := strings.TrimSpace(result.Reason)
+	if reason == "" {
+		reason = fmt.Sprintf("%s denied by permissions policy", kind)
+	}
+	return fmt.Errorf("%s", reason)
 }
 
 func (p *PolicyEngine) ValidatePluginPermissions(pluginName string, permissions []string) error {

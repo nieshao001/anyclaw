@@ -229,9 +229,14 @@ func BrowserNavigateToolWithPolicy(ctx context.Context, input map[string]any, op
 		return "", fmt.Errorf("url is required")
 	}
 	if opts.Policy != nil {
-		if err := opts.Policy.CheckEgressURL(urlStr); err != nil {
+		action := PermissionAction{Kind: "network", ToolName: "browser_navigate", URL: urlStr}
+		if HasPermissionActionGrant(ctx, action) {
+			// granted by the active approval flow
+		} else if err := opts.Policy.CheckEgressURL(urlStr); err != nil {
 			return "", err
 		}
+	} else if err := CheckPermission(ctx, opts, PermissionAction{Kind: "network", ToolName: "browser_navigate", URL: urlStr}); err != nil {
+		return "", err
 	}
 	return BrowserNavigateTool(ctx, input)
 }
@@ -314,10 +319,13 @@ func BrowserScreenshotToolWithPolicy(ctx context.Context, input map[string]any, 
 	}
 	resolved := normalizePolicyArtifactPath(path, opts.WorkingDir)
 	if opts.Policy != nil {
-		if err := opts.Policy.CheckWritePath(resolved); err != nil {
+		action := PermissionAction{Kind: "write", ToolName: "browser_screenshot", Path: resolved}
+		if HasPermissionActionGrant(ctx, action) {
+			// granted by the active approval flow
+		} else if err := opts.Policy.CheckWritePath(resolved); err != nil {
 			return "", err
 		}
-	} else if err := validateProtectedPath(resolved, opts.ProtectedPaths); err != nil {
+	} else if err := CheckPermission(ctx, opts, PermissionAction{Kind: "write", ToolName: "browser_screenshot", Path: resolved}); err != nil {
 		return "", err
 	}
 	cloned := cloneBrowserInput(input)
@@ -363,10 +371,16 @@ func BrowserUploadToolWithPolicy(ctx context.Context, input map[string]any, opts
 	}
 	resolved := normalizePolicyArtifactPath(path, opts.WorkingDir)
 	if opts.Policy != nil {
-		if err := opts.Policy.CheckBrowserUpload(resolved, pageCtx.lastURL); err != nil {
+		readAction := PermissionAction{Kind: "read", ToolName: "browser_upload", Path: resolved}
+		networkAction := PermissionAction{Kind: "network", ToolName: "browser_upload", URL: pageCtx.lastURL}
+		if HasPermissionActionGrant(ctx, readAction) || HasPermissionActionGrant(ctx, networkAction) {
+			// granted by the active approval flow
+		} else if err := opts.Policy.CheckBrowserUpload(resolved, pageCtx.lastURL); err != nil {
 			return "", err
 		}
-	} else if err := validateProtectedPath(resolved, opts.ProtectedPaths); err != nil {
+	} else if err := CheckPermission(ctx, opts, PermissionAction{Kind: "read", ToolName: "browser_upload", Path: resolved}); err != nil {
+		return "", err
+	} else if err := CheckPermission(ctx, opts, PermissionAction{Kind: "network", ToolName: "browser_upload", URL: pageCtx.lastURL}); err != nil {
 		return "", err
 	}
 	cloned := cloneBrowserInput(input)
@@ -472,10 +486,13 @@ func BrowserPDFToolWithPolicy(ctx context.Context, input map[string]any, opts Bu
 	}
 	resolved := normalizePolicyArtifactPath(path, opts.WorkingDir)
 	if opts.Policy != nil {
-		if err := opts.Policy.CheckWritePath(resolved); err != nil {
+		action := PermissionAction{Kind: "write", ToolName: "browser_pdf", Path: resolved}
+		if HasPermissionActionGrant(ctx, action) {
+			// granted by the active approval flow
+		} else if err := opts.Policy.CheckWritePath(resolved); err != nil {
 			return "", err
 		}
-	} else if err := validateProtectedPath(resolved, opts.ProtectedPaths); err != nil {
+	} else if err := CheckPermission(ctx, opts, PermissionAction{Kind: "write", ToolName: "browser_pdf", Path: resolved}); err != nil {
 		return "", err
 	}
 	cloned := cloneBrowserInput(input)
@@ -651,17 +668,27 @@ func BrowserDownloadToolWithPolicy(ctx context.Context, input map[string]any, op
 	}
 	if opts.Policy != nil {
 		if urlStr, _ := input["url"].(string); strings.TrimSpace(urlStr) != "" {
-			if err := opts.Policy.CheckEgressURL(urlStr); err != nil {
+			action := PermissionAction{Kind: "network", ToolName: "browser_download", URL: urlStr}
+			if HasPermissionActionGrant(ctx, action) {
+				// granted by the active approval flow
+			} else if err := opts.Policy.CheckEgressURL(urlStr); err != nil {
 				return "", err
 			}
+		}
+	} else if urlStr, _ := input["url"].(string); strings.TrimSpace(urlStr) != "" {
+		if err := CheckPermission(ctx, opts, PermissionAction{Kind: "network", ToolName: "browser_download", URL: urlStr}); err != nil {
+			return "", err
 		}
 	}
 	resolved := normalizePolicyArtifactPath(path, opts.WorkingDir)
 	if opts.Policy != nil {
-		if err := opts.Policy.CheckWritePath(resolved); err != nil {
+		action := PermissionAction{Kind: "write", ToolName: "browser_download", Path: resolved}
+		if HasPermissionActionGrant(ctx, action) {
+			// granted by the active approval flow
+		} else if err := opts.Policy.CheckWritePath(resolved); err != nil {
 			return "", err
 		}
-	} else if err := validateProtectedPath(resolved, opts.ProtectedPaths); err != nil {
+	} else if err := CheckPermission(ctx, opts, PermissionAction{Kind: "write", ToolName: "browser_download", Path: resolved}); err != nil {
 		return "", err
 	}
 	cloned := cloneBrowserInput(input)
@@ -698,9 +725,16 @@ func BrowserTabNewTool(ctx context.Context, input map[string]any) (string, error
 func BrowserTabNewToolWithPolicy(ctx context.Context, input map[string]any, opts BuiltinOptions) (string, error) {
 	if opts.Policy != nil {
 		if urlStr, _ := input["url"].(string); strings.TrimSpace(urlStr) != "" {
-			if err := opts.Policy.CheckEgressURL(urlStr); err != nil {
+			action := PermissionAction{Kind: "network", ToolName: "browser_tab_new", URL: urlStr}
+			if HasPermissionActionGrant(ctx, action) {
+				// granted by the active approval flow
+			} else if err := opts.Policy.CheckEgressURL(urlStr); err != nil {
 				return "", err
 			}
+		}
+	} else if urlStr, _ := input["url"].(string); strings.TrimSpace(urlStr) != "" {
+		if err := CheckPermission(ctx, opts, PermissionAction{Kind: "network", ToolName: "browser_tab_new", URL: urlStr}); err != nil {
+			return "", err
 		}
 	}
 	return BrowserTabNewTool(ctx, input)

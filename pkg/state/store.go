@@ -85,6 +85,9 @@ func (s *Store) load() error {
 	s.workspaces = cloneWorkspaces(state.Workspaces)
 	s.jobs = cloneJobs(state.Jobs)
 	changed := s.pruneOrphanedApprovalsLocked()
+	if s.pruneLegacyAllowedPendingApprovalsLocked() {
+		changed = true
+	}
 	if s.repairPendingSessionMessagesLocked() {
 		changed = true
 	}
@@ -376,6 +379,121 @@ func (s *Store) pruneOrphanedApprovalsLocked() bool {
 		s.approvals = filtered
 	}
 	return changed
+}
+
+func (s *Store) pruneLegacyAllowedPendingApprovalsLocked() bool {
+	if len(s.approvals) == 0 {
+		return false
+	}
+	filtered := make([]*Approval, 0, len(s.approvals))
+	changed := false
+	for _, approval := range s.approvals {
+		if isLegacyAllowedPendingApproval(approval) {
+			changed = true
+			if session := s.sessions[strings.TrimSpace(approval.SessionID)]; session != nil && session.Presence == "waiting_approval" {
+				session.Presence = "idle"
+				session.Typing = false
+				session.QueueDepth = 0
+				if session.UpdatedAt.Before(approval.RequestedAt) {
+					session.UpdatedAt = approval.RequestedAt
+				}
+				if session.LastActiveAt.Before(approval.RequestedAt) {
+					session.LastActiveAt = approval.RequestedAt
+				}
+			}
+			continue
+		}
+		filtered = append(filtered, approval)
+	}
+	if changed {
+		s.approvals = filtered
+	}
+	return changed
+}
+
+func isLegacyAllowedPendingApproval(approval *Approval) bool {
+	if approval == nil || !strings.EqualFold(strings.TrimSpace(approval.Status), "pending") {
+		return false
+	}
+	if strings.TrimSpace(approval.TaskID) != "" || strings.TrimSpace(approval.SessionID) == "" {
+		return false
+	}
+	if !strings.EqualFold(strings.TrimSpace(approval.Action), "tool_call") {
+		return false
+	}
+	if !legacyAllowedApprovalTool(approval.ToolName) {
+		return false
+	}
+	kind := strings.TrimSpace(fmt.Sprint(approval.Payload["permission_kind"]))
+	if kind != "" && kind != "execute" {
+		return false
+	}
+	reason := legacyApprovalPayloadString(approval.Payload, "permission_reason")
+	if reason != "" {
+		return false
+	}
+	capability := legacyApprovalPayloadString(approval.Payload, "capability")
+	if capability != "" {
+		return false
+	}
+	command := legacyApprovalPayloadString(approval.Payload, "command")
+	if command == "" {
+		args, _ := approval.Payload["args"].(map[string]any)
+		command = legacyApprovalPayloadString(args, "command")
+		if command == "" {
+			command = legacyApprovalPayloadString(args, "cmd")
+		}
+	}
+	return !legacyApprovalCommandLooksDangerous(command)
+}
+
+func legacyApprovalPayloadString(payload map[string]any, key string) string {
+	if payload == nil {
+		return ""
+	}
+	value, ok := payload[key]
+	if !ok || value == nil {
+		return ""
+	}
+	return strings.TrimSpace(fmt.Sprint(value))
+}
+
+func legacyAllowedApprovalTool(toolName string) bool {
+	switch strings.TrimSpace(strings.ToLower(toolName)) {
+	case "run_command", "exec", "process":
+		return true
+	default:
+		return false
+	}
+}
+
+func legacyApprovalCommandLooksDangerous(command string) bool {
+	command = strings.TrimSpace(strings.ToLower(command))
+	if command == "" {
+		return false
+	}
+	patterns := []string{
+		"rm -rf",
+		"del /f",
+		"del /q",
+		"del /s",
+		"format ",
+		"shutdown",
+		"reboot",
+		"reg delete",
+		"reg add",
+		"sc delete",
+		"sc create",
+		"mkfs.",
+		"fdisk",
+		"sudo rm",
+	}
+	for _, pattern := range patterns {
+		if strings.Contains(command, pattern) {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *Store) hasTaskLocked(taskID string) bool {

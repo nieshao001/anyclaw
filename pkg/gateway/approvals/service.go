@@ -66,7 +66,9 @@ func (svc Service) HandleResolved(updated *state.Approval, approved bool, commen
 		return
 	}
 	if svc.Sessions != nil {
-		_, _ = svc.Sessions.FailTurn(updated.SessionID)
+		if _, err := svc.Sessions.AddAssistantMessage(updated.SessionID, sessionApprovalRejectedAssistantMessage(updated, comment)); err != nil {
+			_, _ = svc.Sessions.FailTurn(updated.SessionID)
+		}
 	} else {
 		svc.UpdateSessionPresence(updated.SessionID, "idle", false)
 	}
@@ -74,6 +76,8 @@ func (svc Service) HandleResolved(updated *state.Approval, approved bool, commen
 		"approval_id": updated.ID,
 		"reason":      firstNonEmpty(strings.TrimSpace(comment), "approval rejected"),
 		"source":      "approval",
+		"status":      "rejected",
+		"tool_name":   strings.TrimSpace(updated.ToolName),
 	})
 }
 
@@ -156,4 +160,25 @@ func firstNonEmpty(values ...string) string {
 		}
 	}
 	return ""
+}
+
+func sessionApprovalRejectedAssistantMessage(approval *state.Approval, comment string) string {
+	toolName := "工具调用"
+	if approval != nil {
+		toolName = firstNonEmpty(approval.ToolName, toolName)
+		comment = firstNonEmpty(comment, approval.Comment)
+	}
+	reason := sentence(firstNonEmpty(comment, "用户拒绝/取消了该操作"))
+	return fmt.Sprintf("已处理：\n- 已取消等待确认的工具调用 `%s`。\n\n已验证：\n- 该操作未继续执行。\n\n未确认/阻塞：\n- %s", toolName, reason)
+}
+
+func sentence(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return ""
+	}
+	if strings.HasSuffix(value, ".") || strings.HasSuffix(value, "。") || strings.HasSuffix(value, "!") || strings.HasSuffix(value, "！") || strings.HasSuffix(value, "?") || strings.HasSuffix(value, "？") {
+		return value
+	}
+	return value + "。"
 }

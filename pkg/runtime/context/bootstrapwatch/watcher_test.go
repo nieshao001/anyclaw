@@ -79,19 +79,19 @@ func TestWatcherAutoDetect(t *testing.T) {
 		Files:    []FileType{FileAgents},
 	})
 
-	_, ok := w.Get(FileSoul)
+	_, ok := w.Get(FileRules)
 	if ok {
-		t.Error("expected SOUL.md not loaded initially")
+		t.Error("expected RULES.md not loaded initially")
 	}
 
-	writeFile(t, dir, "SOUL.md", "# Soul\npurpose: help")
+	writeFile(t, dir, "RULES.md", "# Rules\npurpose: help")
 
 	time.Sleep(100 * time.Millisecond)
 	w.checkChanges()
 
-	_, ok = w.Get(FileSoul)
+	_, ok = w.Get(FileRules)
 	if !ok {
-		t.Error("expected SOUL.md detected after creation")
+		t.Error("expected RULES.md detected after creation")
 	}
 }
 

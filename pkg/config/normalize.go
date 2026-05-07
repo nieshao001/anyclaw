@@ -41,8 +41,20 @@ func applyLegacyAliases(cfg *Config, raw map[string]any) {
 		if value, ok := readStringAlias(agentMap, "workingDir", "working_dir", "workspace"); ok {
 			cfg.Agent.WorkingDir = value
 		}
-		if value, ok := readStringAlias(agentMap, "permissionLevel", "permission_level"); ok {
-			cfg.Agent.PermissionLevel = value
+	}
+
+	if permissionsMap, ok := nestedMap(raw, "permissions"); ok {
+		if value, ok := readStringAlias(permissionsMap, "sandboxMode", "sandbox_mode"); ok {
+			cfg.Permissions.SandboxMode = value
+		}
+		if value, ok := readStringAlias(permissionsMap, "approvalPolicy", "approval_policy"); ok {
+			cfg.Permissions.ApprovalPolicy = value
+		}
+		if value, ok := readStringAlias(permissionsMap, "networkAccess", "network_access"); ok {
+			cfg.Permissions.NetworkAccess = value
+		}
+		if value, ok := readStringAlias(permissionsMap, "desktopAccess", "desktop_access"); ok {
+			cfg.Permissions.DesktopAccess = value
 		}
 	}
 
@@ -134,8 +146,12 @@ func normalizeLoadedConfig(cfg *Config) {
 	cfg.LLM.Proxy = strings.TrimSpace(cfg.LLM.Proxy)
 	cfg.Agent.Name = strings.TrimSpace(cfg.Agent.Name)
 	cfg.Agent.Description = strings.TrimSpace(cfg.Agent.Description)
-	cfg.Agent.PermissionLevel = strings.TrimSpace(cfg.Agent.PermissionLevel)
 	cfg.Agent.ActiveProfile = strings.TrimSpace(cfg.Agent.ActiveProfile)
+	cfg.Agent.PermissionLevel = normalizePermissionValue(cfg.Agent.PermissionLevel, "limited")
+	cfg.Permissions.SandboxMode = normalizePermissionValue(cfg.Permissions.SandboxMode, "workspace-write")
+	cfg.Permissions.ApprovalPolicy = normalizePermissionValue(cfg.Permissions.ApprovalPolicy, "on-request")
+	cfg.Permissions.NetworkAccess = normalizePermissionValue(cfg.Permissions.NetworkAccess, "enabled")
+	cfg.Permissions.DesktopAccess = normalizePermissionValue(cfg.Permissions.DesktopAccess, "ask-once-per-session")
 	cfg.Computer.Backend = strings.TrimSpace(strings.ToLower(cfg.Computer.Backend))
 	cfg.Computer.CoordinateSpace = strings.TrimSpace(strings.ToLower(cfg.Computer.CoordinateSpace))
 	if cfg.Computer.Backend == "" {
@@ -158,11 +174,17 @@ func normalizeLoadedConfig(cfg *Config) {
 	cfg.Sandbox.BaseDir = cleanConfigPath(cfg.Sandbox.BaseDir)
 	cfg.Daemon.PIDFile = cleanConfigPath(cfg.Daemon.PIDFile)
 	cfg.Daemon.LogFile = cleanConfigPath(cfg.Daemon.LogFile)
-	cfg.Security.DesktopApprovalScope = strings.TrimSpace(strings.ToLower(cfg.Security.DesktopApprovalScope))
-	if cfg.Security.DesktopApprovalScope == "" {
-		cfg.Security.DesktopApprovalScope = "capability"
-	}
 	cfg.Security.AuditLog = cleanConfigPath(cfg.Security.AuditLog)
+	if len(cfg.Security.DangerousCommandPatterns) == 0 {
+		cfg.Security.DangerousCommandPatterns = defaultDangerousCommandPatterns()
+	}
+	if len(cfg.Security.ProtectedPaths) == 0 {
+		cfg.Security.ProtectedPaths = defaultProtectedPaths()
+	}
+	cfg.Security.AllowedReadPaths = normalizeStringList(cfg.Security.AllowedReadPaths)
+	cfg.Security.AllowedWritePaths = normalizeStringList(cfg.Security.AllowedWritePaths)
+	cfg.Security.AllowedEgressDomains = normalizeStringListLower(cfg.Security.AllowedEgressDomains)
+	cfg.Security.DesktopApprovalScope = normalizePermissionValue(cfg.Security.DesktopApprovalScope, "capability")
 	cfg.Gateway.ControlUI.BasePath = normalizeControlUIBasePath(cfg.Gateway.ControlUI.BasePath)
 	cfg.Gateway.ControlUI.Root = cleanConfigPath(cfg.Gateway.ControlUI.Root)
 
@@ -179,6 +201,14 @@ func normalizeLoadedConfig(cfg *Config) {
 	if strings.TrimSpace(cfg.LLM.DefaultProviderRef) == "" && len(cfg.Providers) == 1 {
 		cfg.LLM.DefaultProviderRef = cfg.Providers[0].ID
 	}
+}
+
+func normalizePermissionValue(value string, fallback string) string {
+	value = strings.TrimSpace(strings.ToLower(value))
+	if value == "" {
+		return fallback
+	}
+	return value
 }
 
 func normalizeControlUIBasePath(raw string) string {

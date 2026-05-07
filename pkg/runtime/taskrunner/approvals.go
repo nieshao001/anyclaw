@@ -135,26 +135,34 @@ func (m *Manager) awaitApprovalsIfNeeded(task *state.Task, session *state.Sessio
 }
 
 func (m *Manager) toolApprovalHook(task *state.Task, session *state.Session, cfg *config.Config) agent.ToolApprovalHook {
-	if m.approvals == nil || cfg == nil || !cfg.Agent.RequireConfirmationForDangerous {
+	if m.approvals == nil || cfg == nil {
 		return nil
 	}
 	return func(ctx context.Context, tc agent.ToolCall) error {
-		err := m.requireToolApproval(task, session, cfg, tc.Name, tc.Args, tc.RequiresApproval)
-		if err == nil && taskApprovalCapability(tc.Name) == tools.HostReviewedCapabilityDesktop {
-			tools.GrantHostReviewedCapability(ctx, tools.HostReviewedCapabilityDesktop)
+		action, decision := taskPermissionDecision(cfg, tc.Name, tc.Args)
+		err := m.requirePermissionApproval(task, session, cfg, tc.Name, tc.Args, action, decision, tc.RequiresApproval)
+		if err == nil {
+			tools.GrantPermissionAction(ctx, action)
+			if action.Capability == tools.HostReviewedCapabilityDesktop {
+				tools.GrantHostReviewedCapability(ctx, tools.HostReviewedCapabilityDesktop)
+			}
 		}
 		return err
 	}
 }
 
 func (m *Manager) protocolApprovalHook(task *state.Task, session *state.Session, cfg *config.Config) tools.ToolApprovalHook {
-	if m.approvals == nil || cfg == nil || !cfg.Agent.RequireConfirmationForDangerous {
+	if m.approvals == nil || cfg == nil {
 		return nil
 	}
 	return func(ctx context.Context, call tools.ToolApprovalCall) error {
-		err := m.requireToolApproval(task, session, cfg, call.Name, call.Args)
-		if err == nil && taskApprovalCapability(call.Name) == tools.HostReviewedCapabilityDesktop {
-			tools.GrantHostReviewedCapability(ctx, tools.HostReviewedCapabilityDesktop)
+		action, decision := taskPermissionDecision(cfg, call.Name, call.Args)
+		err := m.requirePermissionApproval(task, session, cfg, call.Name, call.Args, action, decision)
+		if err == nil {
+			tools.GrantPermissionAction(ctx, action)
+			if action.Capability == tools.HostReviewedCapabilityDesktop {
+				tools.GrantHostReviewedCapability(ctx, tools.HostReviewedCapabilityDesktop)
+			}
 		}
 		return err
 	}
@@ -213,6 +221,10 @@ func (m *Manager) requireToolApproval(task *state.Task, session *state.Session, 
 		"task_id":   task.ID,
 		"workspace": task.Workspace,
 	}
+	if cfg != nil {
+		action, decision := taskPermissionDecision(cfg, toolName, args)
+		applyTaskPermissionPayload(payload, cfg, action, decision)
+	}
 	if description := toolApprovalDescription(toolName, args); description != "" {
 		payload["description"] = description
 	}
@@ -251,6 +263,64 @@ func (m *Manager) requireToolApproval(task *state.Task, session *state.Session, 
 	return ErrTaskWaitingApproval
 }
 
+func applyTaskPermissionPayload(payload map[string]any, cfg *config.Config, action tools.PermissionAction, decision tools.PermissionResult) {
+	if payload == nil || cfg == nil {
+		return
+	}
+	payload["permission_kind"] = action.Kind
+	payload["permission_reason"] = decision.Reason
+	payload["sandbox_mode"] = cfg.Permissions.SandboxMode
+	payload["approval_policy"] = cfg.Permissions.ApprovalPolicy
+	payload["network_access"] = cfg.Permissions.NetworkAccess
+	payload["desktop_access"] = cfg.Permissions.DesktopAccess
+	if action.Capability != "" {
+		payload["capability"] = action.Capability
+	}
+	switch action.Kind {
+	case "read", "write", "delete":
+		payload["target"] = action.Path
+	case "execute":
+		payload["target"] = action.CWD
+		payload["command"] = action.Command
+	case "network":
+		payload["target"] = action.URL
+	case "desktop":
+		payload["target"] = "local desktop"
+	}
+}
+
+func (m *Manager) requirePermissionApproval(task *state.Task, session *state.Session, cfg *config.Config, toolName string, args map[string]any, action tools.PermissionAction, decision tools.PermissionResult, forceApproval ...bool) error {
+	if shouldForceTaskPermissionApproval(cfg, decision, forceApproval...) {
+		decision.Decision = tools.DecisionAsk
+		if strings.TrimSpace(decision.Reason) == "" {
+			decision.Reason = "tool requested permission approval"
+		}
+	}
+	switch decision.Decision {
+	case tools.DecisionAllow:
+		return nil
+	case tools.DecisionDeny:
+		if strings.TrimSpace(decision.Reason) == "" {
+			decision.Reason = "operation denied by permissions policy"
+		}
+		return fmt.Errorf("%s", decision.Reason)
+	case tools.DecisionAsk:
+		return m.requireToolApproval(task, session, cfg, toolName, args, true)
+	default:
+		return nil
+	}
+}
+
+func shouldForceTaskPermissionApproval(cfg *config.Config, decision tools.PermissionResult, forceApproval ...bool) bool {
+	if decision.Decision != tools.DecisionAllow || !requiresExplicitToolApproval(forceApproval...) {
+		return false
+	}
+	if cfg != nil && strings.EqualFold(strings.TrimSpace(cfg.Permissions.ApprovalPolicy), tools.ApprovalPolicyNever) {
+		return false
+	}
+	return true
+}
+
 func requiresToolApproval(tc agent.ToolCall) bool {
 	return tc.RequiresApproval || RequiresToolApprovalName(tc.Name)
 }
@@ -261,7 +331,7 @@ func RequiresToolApprovalName(name string) bool {
 		return true
 	}
 	switch name {
-	case "run_command", "write_file", "exec", "process", "write", "edit", "apply_patch", "fetch_url", "web_fetch", "image", "image_analyze", "clihub_exec", "intent_route", "delegate_task", "browser_upload", "computer_observe", "computer_action", "desktop_open", "desktop_type", "desktop_type_human", "desktop_hotkey", "desktop_clipboard_set", "desktop_clipboard_get", "desktop_paste", "desktop_click", "desktop_screenshot", "desktop_screenshot_window", "desktop_move", "desktop_double_click", "desktop_scroll", "desktop_drag", "desktop_wait", "desktop_list_windows", "desktop_wait_window", "desktop_focus_window", "desktop_inspect_ui", "desktop_invoke_ui", "desktop_set_value_ui", "desktop_resolve_target", "desktop_activate_target", "desktop_set_target_value", "desktop_match_image", "desktop_click_image", "desktop_wait_image", "desktop_ocr", "desktop_verify_text", "desktop_find_text", "desktop_click_text", "desktop_wait_text", "desktop_plan":
+	case "run_command", "write_file", "exec", "process", "write", "edit", "apply_patch", "fetch_url", "web_fetch", "image", "image_analyze", "skill_runner", "clihub_exec", "intent_route", "delegate_task", "browser_upload", "computer_observe", "computer_action", "desktop_open", "desktop_type", "desktop_type_human", "desktop_hotkey", "desktop_clipboard_set", "desktop_clipboard_get", "desktop_paste", "desktop_click", "desktop_screenshot", "desktop_screenshot_window", "desktop_move", "desktop_double_click", "desktop_scroll", "desktop_drag", "desktop_wait", "desktop_list_windows", "desktop_wait_window", "desktop_focus_window", "desktop_inspect_ui", "desktop_invoke_ui", "desktop_set_value_ui", "desktop_resolve_target", "desktop_activate_target", "desktop_set_target_value", "desktop_match_image", "desktop_click_image", "desktop_wait_image", "desktop_ocr", "desktop_verify_text", "desktop_find_text", "desktop_click_text", "desktop_wait_text", "desktop_plan":
 		return true
 	default:
 		return false
@@ -277,12 +347,45 @@ func requiresToolApprovalNameOrFlag(name string, forceApproval ...bool) bool {
 	return RequiresToolApprovalName(name)
 }
 
+func requiresExplicitToolApproval(forceApproval ...bool) bool {
+	for _, force := range forceApproval {
+		if force {
+			return true
+		}
+	}
+	return false
+}
+
 func taskApprovalCapability(toolName string) string {
 	name := strings.TrimSpace(strings.ToLower(toolName))
 	if name == "desktop_plan" || strings.HasPrefix(name, "desktop_") || strings.HasPrefix(name, "computer_") {
 		return tools.HostReviewedCapabilityDesktop
 	}
 	return ""
+}
+
+func taskPermissionDecision(cfg *config.Config, toolName string, args map[string]any) (tools.PermissionAction, tools.PermissionResult) {
+	workingDir := ""
+	if cfg != nil {
+		workingDir = strings.TrimSpace(cfg.Agent.WorkingDir)
+		if workingDir == "" {
+			workingDir = strings.TrimSpace(cfg.Agent.WorkDir)
+		}
+	}
+	action := tools.PermissionActionForTool(toolName, args, workingDir)
+	if action.Capability == "" {
+		action.Capability = taskApprovalCapability(toolName)
+	}
+	if cfg == nil {
+		return action, tools.PermissionResult{Decision: tools.DecisionAllow}
+	}
+	engine := tools.NewPermissionEngine(workingDir, tools.PermissionOptions{
+		SandboxMode:    cfg.Permissions.SandboxMode,
+		ApprovalPolicy: cfg.Permissions.ApprovalPolicy,
+		NetworkAccess:  cfg.Permissions.NetworkAccess,
+		DesktopAccess:  cfg.Permissions.DesktopAccess,
+	})
+	return action, engine.Decide(action)
 }
 
 func toolApprovalDescription(toolName string, args map[string]any) string {

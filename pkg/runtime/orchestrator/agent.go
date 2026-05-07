@@ -3,6 +3,8 @@ package orchestrator
 import (
 	"context"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 
@@ -137,10 +139,15 @@ func NewSubAgentWithRuntimeOptions(def AgentDefinition, llmClient agent.LLMCalle
 	// Each agent gets its own memory instance for isolation
 	var agentMem memory.MemoryBackend
 	if mem != nil && strings.TrimSpace(def.WorkingDir) != "" {
-		subCfg := memory.DefaultConfig(def.WorkingDir)
+		subMemoryRoot := subAgentMemoryRoot(mem)
+		subMemoryDir := memory.CodexMemoryWorkspaceDir(subMemoryRoot, def.WorkingDir)
+		subCfg := memory.DefaultConfig(subMemoryDir)
 		subMem, err := memory.NewMemoryBackend(subCfg)
 		if err == nil {
 			if initErr := subMem.Init(); initErr == nil {
+				if db, ok := subMem.(interface{ SetDailyDir(string) }); ok {
+					db.SetDailyDir(filepath.Join(subMemoryDir, "daily"))
+				}
 				agentMem = subMem
 			} else {
 				agentMem = mem // fallback
@@ -240,6 +247,22 @@ func NewSubAgentWithRuntimeOptions(def AgentDefinition, llmClient agent.LLMCalle
 	return subAgent, nil
 }
 
+func subAgentMemoryRoot(mem memory.MemoryBackend) string {
+	if daily, ok := mem.(memory.DailyBackend); ok {
+		dailyDir := strings.TrimSpace(daily.DailyDir())
+		if dailyDir != "" {
+			workspaceDir := filepath.Dir(dailyDir)
+			workspacesDir := filepath.Dir(workspaceDir)
+			memoryDir := filepath.Dir(workspacesDir)
+			root := filepath.Dir(memoryDir)
+			if strings.TrimSpace(root) != "" && root != "." && root != string(filepath.Separator) {
+				return root
+			}
+		}
+	}
+	return filepath.Join(os.TempDir(), "anyclaw", "subagent-memory")
+}
+
 func subAgentBuiltinOptions(base tools.BuiltinOptions, def AgentDefinition, permLevel string) tools.BuiltinOptions {
 	opts := base
 	if workingDir := strings.TrimSpace(def.WorkingDir); workingDir != "" {
@@ -250,11 +273,15 @@ func subAgentBuiltinOptions(base tools.BuiltinOptions, def AgentDefinition, perm
 		opts.Policy = tools.NewPolicyEngine(tools.PolicyOptions{
 			WorkingDir:           opts.WorkingDir,
 			PermissionLevel:      permLevel,
+			Permissions:          opts.Permissions,
 			ProtectedPaths:       opts.ProtectedPaths,
 			AllowedReadPaths:     opts.AllowedReadPaths,
 			AllowedWritePaths:    opts.AllowedWritePaths,
 			AllowedEgressDomains: opts.AllowedEgressDomains,
 		})
+	}
+	if opts.PermissionEngine != nil {
+		opts.PermissionEngine = tools.NewPermissionEngine(opts.WorkingDir, opts.Permissions)
 	}
 	return opts
 }
