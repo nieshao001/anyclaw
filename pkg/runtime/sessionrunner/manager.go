@@ -324,22 +324,14 @@ func (m *Manager) RequireToolApproval(session *state.Session, meta ApprovalConte
 }
 
 func (m *Manager) requirePermissionApproval(session *state.Session, cfg *config.Config, meta ApprovalContext, toolName string, args map[string]any, action tools.PermissionAction, decision tools.PermissionResult, forceApproval ...bool) (bool, error) {
-	if len(forceApproval) > 0 {
-		for _, force := range forceApproval {
-			if force {
-				decision.Decision = tools.DecisionAsk
-				if strings.TrimSpace(decision.Reason) == "" {
-					decision.Reason = "tool requested permission approval"
-				}
-				break
-			}
+	if shouldForceSessionPermissionApproval(cfg, decision, forceApproval...) {
+		decision.Decision = tools.DecisionAsk
+		if strings.TrimSpace(decision.Reason) == "" {
+			decision.Reason = "tool requested permission approval"
 		}
 	}
 	switch decision.Decision {
 	case tools.DecisionAllow:
-		if requiresExplicitToolApproval(forceApproval...) {
-			return m.requireToolApproval(session, cfg, meta, toolName, args, true)
-		}
 		return false, nil
 	case tools.DecisionDeny:
 		if strings.TrimSpace(decision.Reason) == "" {
@@ -351,6 +343,16 @@ func (m *Manager) requirePermissionApproval(session *state.Session, cfg *config.
 	default:
 		return false, nil
 	}
+}
+
+func shouldForceSessionPermissionApproval(cfg *config.Config, decision tools.PermissionResult, forceApproval ...bool) bool {
+	if decision.Decision != tools.DecisionAllow || !requiresExplicitToolApproval(forceApproval...) {
+		return false
+	}
+	if cfg != nil && strings.EqualFold(strings.TrimSpace(cfg.Permissions.ApprovalPolicy), tools.ApprovalPolicyNever) {
+		return false
+	}
+	return true
 }
 
 func (m *Manager) requireToolApproval(session *state.Session, cfg *config.Config, meta ApprovalContext, toolName string, args map[string]any, forceApproval ...bool) (bool, error) {
@@ -557,7 +559,7 @@ func (m *Manager) RecordToolActivities(session *state.Session, activities []agen
 
 func (m *Manager) tryDirectDesktopOpen(ctx context.Context, session *state.Session, targetRuntime *appruntime.MainRuntime, meta ApprovalContext, resume bool) (*RunResult, bool, error) {
 	request, ok := directDesktopOpenTarget(meta.Message, runtimeWorkingDir(targetRuntime))
-	if !ok || session == nil || targetRuntime == nil {
+	if !ok || session == nil || targetRuntime == nil || targetRuntime.Config == nil {
 		return nil, false, nil
 	}
 	ctx = tools.WithApprovalGrantScope(ctx)
@@ -570,7 +572,16 @@ func (m *Manager) tryDirectDesktopOpen(ctx context.Context, session *state.Sessi
 	if request.Browser != "" {
 		input["browser"] = request.Browser
 	}
-	approved, err := m.requireToolApproval(session, targetRuntime.Config, meta, "desktop_open", input)
+	if err := m.requireDirectDesktopOpenNetworkPermission(session, targetRuntime.Config, meta, request); err != nil {
+		if errors.Is(err, ErrTaskWaitingApproval) {
+			if pendingSession, persistErr := m.sessions.EnsurePendingUserMessage(session.ID, meta.Message); persistErr == nil {
+				return &RunResult{Session: pendingSession}, true, err
+			}
+		}
+		return &RunResult{Session: session}, true, err
+	}
+	action, decision := sessionPermissionDecision(targetRuntime.Config, "desktop_open", input)
+	approved, err := m.requirePermissionApproval(session, targetRuntime.Config, meta, "desktop_open", input, action, decision)
 	if err != nil {
 		if errors.Is(err, ErrTaskWaitingApproval) {
 			if pendingSession, persistErr := m.sessions.EnsurePendingUserMessage(session.ID, meta.Message); persistErr == nil {
@@ -647,6 +658,32 @@ func (m *Manager) tryDirectDesktopOpen(ctx context.Context, session *state.Sessi
 		"source":          firstNonEmpty(strings.TrimSpace(meta.Source), "api"),
 	})
 	return &RunResult{Response: response, Session: updatedSession}, true, nil
+}
+
+func (m *Manager) requireDirectDesktopOpenNetworkPermission(session *state.Session, cfg *config.Config, meta ApprovalContext, request directDesktopOpenRequest) error {
+	if !strings.EqualFold(strings.TrimSpace(request.Kind), "url") {
+		return nil
+	}
+	networkArgs := map[string]any{"url": request.Target}
+	action, decision := sessionPermissionDecision(cfg, "browser_navigate", networkArgs)
+	if _, err := m.requirePermissionApproval(session, cfg, meta, "browser_navigate", networkArgs, action, decision); err != nil {
+		return err
+	}
+	policy := tools.NewPolicyEngine(tools.PolicyOptions{
+		WorkingDir:      sessionPermissionWorkingDir(cfg),
+		PermissionLevel: cfg.Agent.PermissionLevel,
+		Permissions: tools.PermissionOptions{
+			SandboxMode:    cfg.Permissions.SandboxMode,
+			ApprovalPolicy: cfg.Permissions.ApprovalPolicy,
+			NetworkAccess:  cfg.Permissions.NetworkAccess,
+			DesktopAccess:  cfg.Permissions.DesktopAccess,
+		},
+		AllowedEgressDomains: cfg.Security.AllowedEgressDomains,
+	})
+	if err := policy.CheckEgressURL(request.Target); err != nil {
+		return err
+	}
+	return nil
 }
 
 func (m *Manager) verifyDirectDesktopOpen(ctx context.Context, targetRuntime *appruntime.MainRuntime, before []desktopWindowSnapshot, kind string) (bool, string, error) {

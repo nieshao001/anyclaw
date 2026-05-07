@@ -125,7 +125,7 @@ func TestRunDirectDesktopOpenVerifiesVisibleBrowserWindow(t *testing.T) {
 		t.Fatalf("appendApprovedToolApproval: %v", err)
 	}
 	runtime := &appruntime.MainRuntime{
-		Config: &config.Config{Agent: config.AgentConfig{RequireConfirmationForDangerous: true}},
+		Config: directDesktopOpenTestConfig(),
 		Tools:  toolsRegistry,
 	}
 	manager.runtimes = testRuntimeProvider{runtime: runtime}
@@ -201,7 +201,7 @@ func TestRunDirectDesktopOpenDoesNotClaimSuccessWithoutVerification(t *testing.T
 		t.Fatalf("appendApprovedToolApproval: %v", err)
 	}
 	runtime := &appruntime.MainRuntime{
-		Config: &config.Config{Agent: config.AgentConfig{RequireConfirmationForDangerous: true}},
+		Config: directDesktopOpenTestConfig(),
 		Tools:  toolsRegistry,
 	}
 	manager.runtimes = testRuntimeProvider{runtime: runtime}
@@ -266,7 +266,7 @@ func TestRunDirectDesktopOpenAllowsExistingBrowserWindowReuse(t *testing.T) {
 		t.Fatalf("appendApprovedToolApproval: %v", err)
 	}
 	runtime := &appruntime.MainRuntime{
-		Config: &config.Config{Agent: config.AgentConfig{RequireConfirmationForDangerous: true}},
+		Config: directDesktopOpenTestConfig(),
 		Tools:  toolsRegistry,
 	}
 	manager.runtimes = testRuntimeProvider{runtime: runtime}
@@ -378,7 +378,7 @@ func TestRunDirectDesktopOpenLocalHTMLUsesDesktopOpenFile(t *testing.T) {
 		t.Fatalf("appendApprovedToolApproval: %v", err)
 	}
 	runtime := &appruntime.MainRuntime{
-		Config: &config.Config{Agent: config.AgentConfig{RequireConfirmationForDangerous: true}},
+		Config: directDesktopOpenTestConfig(),
 		Tools:  toolsRegistry,
 	}
 	manager.runtimes = testRuntimeProvider{runtime: runtime}
@@ -406,6 +406,88 @@ func TestRunDirectDesktopOpenLocalHTMLUsesDesktopOpenFile(t *testing.T) {
 	}
 	if len(toolCalls) < 3 || toolCalls[0] != "desktop_list_windows" || toolCalls[1] != "desktop_open" || toolCalls[2] != "desktop_list_windows" {
 		t.Fatalf("unexpected tool call order %#v", toolCalls)
+	}
+}
+
+func TestRunDirectDesktopOpenDeniesDisabledDesktopAccess(t *testing.T) {
+	manager, _, session, _, _ := newRunManagerTest(t)
+	toolsRegistry := tools.NewRegistry()
+	toolsRegistry.RegisterTool("desktop_open", "Open desktop target", map[string]any{}, func(ctx context.Context, input map[string]any) (string, error) {
+		t.Fatal("desktop_open should not run when desktop access is disabled")
+		return "", nil
+	})
+	cfg := directDesktopOpenTestConfig()
+	cfg.Permissions.DesktopAccess = tools.DesktopAccessDisabled
+	runtime := &appruntime.MainRuntime{
+		Config: cfg,
+		Tools:  toolsRegistry,
+	}
+	manager.runtimes = testRuntimeProvider{runtime: runtime}
+
+	_, err := manager.Run(context.Background(), RunRequest{
+		SessionID: session.ID,
+		Message:   "open https://www.qiniu.com/",
+		Options: RunOptions{
+			Source: "api",
+		},
+	})
+	if err == nil || !strings.Contains(err.Error(), "desktop access is disabled") {
+		t.Fatalf("expected desktop access denial, got %v", err)
+	}
+}
+
+func TestRunDirectDesktopOpenDeniesDisabledNetworkAccessForURL(t *testing.T) {
+	manager, _, session, _, _ := newRunManagerTest(t)
+	toolsRegistry := tools.NewRegistry()
+	toolsRegistry.RegisterTool("desktop_open", "Open desktop target", map[string]any{}, func(ctx context.Context, input map[string]any) (string, error) {
+		t.Fatal("desktop_open should not run when network access is disabled")
+		return "", nil
+	})
+	cfg := directDesktopOpenTestConfig()
+	cfg.Permissions.NetworkAccess = tools.NetworkAccessDisabled
+	cfg.Permissions.ApprovalPolicy = tools.ApprovalPolicyNever
+	runtime := &appruntime.MainRuntime{
+		Config: cfg,
+		Tools:  toolsRegistry,
+	}
+	manager.runtimes = testRuntimeProvider{runtime: runtime}
+
+	_, err := manager.Run(context.Background(), RunRequest{
+		SessionID: session.ID,
+		Message:   "open https://www.qiniu.com/",
+		Options: RunOptions{
+			Source: "api",
+		},
+	})
+	if err == nil || !strings.Contains(err.Error(), "network access denied") {
+		t.Fatalf("expected network access denial, got %v", err)
+	}
+}
+
+func TestRunDirectDesktopOpenDeniesURLOutsideEgressAllowlist(t *testing.T) {
+	manager, _, session, _, _ := newRunManagerTest(t)
+	toolsRegistry := tools.NewRegistry()
+	toolsRegistry.RegisterTool("desktop_open", "Open desktop target", map[string]any{}, func(ctx context.Context, input map[string]any) (string, error) {
+		t.Fatal("desktop_open should not run when egress policy denies the URL")
+		return "", nil
+	})
+	cfg := directDesktopOpenTestConfig()
+	cfg.Security.AllowedEgressDomains = []string{"allowed.example"}
+	runtime := &appruntime.MainRuntime{
+		Config: cfg,
+		Tools:  toolsRegistry,
+	}
+	manager.runtimes = testRuntimeProvider{runtime: runtime}
+
+	_, err := manager.Run(context.Background(), RunRequest{
+		SessionID: session.ID,
+		Message:   "open https://www.qiniu.com/",
+		Options: RunOptions{
+			Source: "api",
+		},
+	})
+	if err == nil || !strings.Contains(err.Error(), "egress denied") {
+		t.Fatalf("expected egress denial, got %v", err)
 	}
 }
 
@@ -737,6 +819,89 @@ func TestRunChannelAllowsPolicyApprovedWorkspaceCommand(t *testing.T) {
 	}
 }
 
+func TestRunChannelForcedApprovalRespectsApprovalPolicyNever(t *testing.T) {
+	manager, _, session, approvals, _ := newChannelManagerTest(t)
+	manager.runtimes = testRuntimeProvider{runtime: &appruntime.MainRuntime{
+		Config: &config.Config{
+			Agent: config.AgentConfig{
+				RequireConfirmationForDangerous: true,
+			},
+			Permissions: config.PermissionsConfig{
+				ApprovalPolicy: tools.ApprovalPolicyNever,
+			},
+		},
+	}}
+
+	manager.execute = func(ctx context.Context, runtime *appruntime.MainRuntime, req appruntime.ExecutionRequest) (*appruntime.ExecutionResult, error) {
+		if req.AgentApprovalHook == nil {
+			t.Fatal("expected AgentApprovalHook to be set for channel execution")
+		}
+		err := req.AgentApprovalHook(ctx, agent.ToolCall{
+			Name:             "run_command",
+			Args:             map[string]any{"command": "echo hi"},
+			RequiresApproval: true,
+		})
+		if err != nil {
+			return &appruntime.ExecutionResult{}, err
+		}
+		return &appruntime.ExecutionResult{Output: "ran"}, nil
+	}
+
+	result, err := manager.RunChannel(context.Background(), ChannelRunRequest{
+		Source:    "slack",
+		SessionID: session.ID,
+		Message:   "run a safe command",
+		QueueMode: "fifo",
+		Meta:      map[string]string{"user_id": "u-1"},
+	})
+	if err != nil {
+		t.Fatalf("RunChannel: %v", err)
+	}
+	if result == nil || result.Response != "ran" {
+		t.Fatalf("unexpected result %#v", result)
+	}
+	if len(approvals.calls) != 0 {
+		t.Fatalf("did not expect approval request under approval_policy=never, got %#v", approvals.calls)
+	}
+}
+
+func TestRunChannelForcedApprovalPromptsWhenPolicyPermits(t *testing.T) {
+	manager, _, session, approvals, _ := newChannelManagerTest(t)
+	manager.runtimes = testRuntimeProvider{runtime: &appruntime.MainRuntime{
+		Config: &config.Config{
+			Agent: config.AgentConfig{
+				RequireConfirmationForDangerous: true,
+			},
+			Permissions: config.PermissionsConfig{
+				ApprovalPolicy: tools.ApprovalPolicyOnRequest,
+			},
+		},
+	}}
+
+	manager.execute = func(ctx context.Context, runtime *appruntime.MainRuntime, req appruntime.ExecutionRequest) (*appruntime.ExecutionResult, error) {
+		err := req.AgentApprovalHook(ctx, agent.ToolCall{
+			Name:             "run_command",
+			Args:             map[string]any{"command": "echo hi"},
+			RequiresApproval: true,
+		})
+		return &appruntime.ExecutionResult{}, err
+	}
+
+	_, err := manager.RunChannel(context.Background(), ChannelRunRequest{
+		Source:    "slack",
+		SessionID: session.ID,
+		Message:   "run a safe command",
+		QueueMode: "fifo",
+		Meta:      map[string]string{"user_id": "u-1"},
+	})
+	if !errors.Is(err, ErrTaskWaitingApproval) {
+		t.Fatalf("expected ErrTaskWaitingApproval, got %v", err)
+	}
+	if len(approvals.calls) != 1 || approvals.calls[0].toolName != "run_command" {
+		t.Fatalf("expected run_command approval request, got %#v", approvals.calls)
+	}
+}
+
 func TestRunChannelRequiresApprovalForDangerousCommand(t *testing.T) {
 	manager, sessions, session, approvals, events := newChannelManagerTest(t)
 
@@ -942,6 +1107,13 @@ func newRunManagerTest(t *testing.T) (*Manager, *state.SessionManager, *state.Se
 	events := &testEventRecorder{}
 	manager := NewManager(store, sessions, testRuntimeProvider{}, approvals, events)
 	return manager, sessions, session, approvals, events
+}
+
+func directDesktopOpenTestConfig() *config.Config {
+	cfg := config.DefaultConfig()
+	cfg.Agent.RequireConfirmationForDangerous = true
+	cfg.Security.AllowedEgressDomains = []string{"qiniu.com"}
+	return cfg
 }
 
 func newChannelManagerTest(t *testing.T) (*Manager, *state.SessionManager, *state.Session, *testApprovalRequester, *testEventRecorder) {

@@ -7,6 +7,16 @@ import (
 	"testing"
 )
 
+var legacyBootstrapFiles = []string{
+	"SOUL.md",
+	"TOOLS.md",
+	"IDENTITY.md",
+	"USER.md",
+	"HEARTBEAT.md",
+	"BOOTSTRAP.md",
+	"MEMORY.md",
+}
+
 func TestEnsureBootstrapCreatesOnlyAgentsFile(t *testing.T) {
 	dir := t.TempDir()
 	if err := EnsureBootstrap(dir, BootstrapOptions{
@@ -54,10 +64,10 @@ func TestEnsureBootstrapDoesNotOverwriteExistingAgentsFile(t *testing.T) {
 	}
 }
 
-func TestEnsureBootstrapRemovesLegacyBootstrapAndMemoryFiles(t *testing.T) {
+func TestEnsureBootstrapPreservesExistingWorkspaceFiles(t *testing.T) {
 	dir := t.TempDir()
 	for _, name := range legacyBootstrapFiles {
-		if err := os.WriteFile(filepath.Join(dir, name), []byte("legacy"), 0o644); err != nil {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte("user-authored "+name), 0o644); err != nil {
 			t.Fatalf("WriteFile(%s): %v", name, err)
 		}
 	}
@@ -73,12 +83,20 @@ func TestEnsureBootstrapRemovesLegacyBootstrapAndMemoryFiles(t *testing.T) {
 	}
 
 	for _, name := range legacyBootstrapFiles {
-		if _, err := os.Stat(filepath.Join(dir, name)); !os.IsNotExist(err) {
-			t.Fatalf("expected legacy file %s to be removed, stat err=%v", name, err)
+		data, err := os.ReadFile(filepath.Join(dir, name))
+		if err != nil {
+			t.Fatalf("ReadFile(%s): %v", name, err)
+		}
+		if string(data) != "user-authored "+name {
+			t.Fatalf("expected %s to be preserved, got %q", name, string(data))
 		}
 	}
-	if _, err := os.Stat(filepath.Join(dir, "memory")); !os.IsNotExist(err) {
-		t.Fatalf("expected legacy memory directory to be removed, stat err=%v", err)
+	data, err := os.ReadFile(filepath.Join(dir, "memory", "2026-05-06.md"))
+	if err != nil {
+		t.Fatalf("ReadFile(memory): %v", err)
+	}
+	if string(data) != "legacy memory" {
+		t.Fatalf("expected memory file to be preserved, got %q", string(data))
 	}
 }
 

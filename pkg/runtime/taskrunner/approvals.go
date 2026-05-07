@@ -290,20 +290,14 @@ func applyTaskPermissionPayload(payload map[string]any, cfg *config.Config, acti
 }
 
 func (m *Manager) requirePermissionApproval(task *state.Task, session *state.Session, cfg *config.Config, toolName string, args map[string]any, action tools.PermissionAction, decision tools.PermissionResult, forceApproval ...bool) error {
-	for _, force := range forceApproval {
-		if force {
-			decision.Decision = tools.DecisionAsk
-			if strings.TrimSpace(decision.Reason) == "" {
-				decision.Reason = "tool requested permission approval"
-			}
-			break
+	if shouldForceTaskPermissionApproval(cfg, decision, forceApproval...) {
+		decision.Decision = tools.DecisionAsk
+		if strings.TrimSpace(decision.Reason) == "" {
+			decision.Reason = "tool requested permission approval"
 		}
 	}
 	switch decision.Decision {
 	case tools.DecisionAllow:
-		if requiresExplicitToolApproval(forceApproval...) {
-			return m.requireToolApproval(task, session, cfg, toolName, args, true)
-		}
 		return nil
 	case tools.DecisionDeny:
 		if strings.TrimSpace(decision.Reason) == "" {
@@ -315,6 +309,16 @@ func (m *Manager) requirePermissionApproval(task *state.Task, session *state.Ses
 	default:
 		return nil
 	}
+}
+
+func shouldForceTaskPermissionApproval(cfg *config.Config, decision tools.PermissionResult, forceApproval ...bool) bool {
+	if decision.Decision != tools.DecisionAllow || !requiresExplicitToolApproval(forceApproval...) {
+		return false
+	}
+	if cfg != nil && strings.EqualFold(strings.TrimSpace(cfg.Permissions.ApprovalPolicy), tools.ApprovalPolicyNever) {
+		return false
+	}
+	return true
 }
 
 func requiresToolApproval(tc agent.ToolCall) bool {

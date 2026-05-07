@@ -90,14 +90,6 @@ func TestNewTargetAppAppliesAgentProfileProviderAndPreservesWorkspaceOverride(t 
 	if _, err := os.Stat(filepath.Join(absWorkspacePath, "AGENTS.md")); err != nil {
 		t.Fatalf("expected AGENTS.md to exist: %v", err)
 	}
-	for _, name := range []string{"SOUL.md", "TOOLS.md", "IDENTITY.md", "USER.md", "HEARTBEAT.md", "MEMORY.md", "BOOTSTRAP.md"} {
-		if _, err := os.Stat(filepath.Join(absWorkspacePath, name)); !os.IsNotExist(err) {
-			t.Fatalf("did not expect legacy bootstrap file %s, stat err=%v", name, err)
-		}
-	}
-	if _, err := os.Stat(filepath.Join(absWorkspacePath, "memory")); !os.IsNotExist(err) {
-		t.Fatalf("did not expect legacy workspace memory directory, stat err=%v", err)
-	}
 	if err := app.Memory.Add(memory.MemoryEntry{
 		ID:        "fact-1",
 		Timestamp: filepathModTimeFixture(),
@@ -216,6 +208,15 @@ func TestNewTargetAppAutoCompletesBootstrapWhenAgentProfileAlreadyConfigured(t *
 			t.Fatalf("MkdirAll(%q): %v", dir, err)
 		}
 	}
+	if err := os.MkdirAll(filepath.Join(cfg.Agent.WorkingDir, "memory"), 0o755); err != nil {
+		t.Fatalf("MkdirAll(working memory): %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(cfg.Agent.WorkingDir, "BOOTSTRAP.md"), []byte("user bootstrap"), 0o644); err != nil {
+		t.Fatalf("WriteFile(BOOTSTRAP.md): %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(cfg.Agent.WorkingDir, "memory", "2026-05-06.md"), []byte("user memory"), 0o644); err != nil {
+		t.Fatalf("WriteFile(memory): %v", err)
+	}
 
 	app, err := NewTargetApp(configPath, "", "")
 	if err != nil {
@@ -223,8 +224,19 @@ func TestNewTargetAppAutoCompletesBootstrapWhenAgentProfileAlreadyConfigured(t *
 	}
 	t.Cleanup(func() { _ = app.Close() })
 
-	if _, err := os.Stat(filepath.Join(app.WorkingDir, "BOOTSTRAP.md")); !os.IsNotExist(err) {
-		t.Fatalf("expected BOOTSTRAP.md to be removed for configured workspace, stat err=%v", err)
+	bootstrapData, err := os.ReadFile(filepath.Join(app.WorkingDir, "BOOTSTRAP.md"))
+	if err != nil {
+		t.Fatalf("ReadFile(BOOTSTRAP.md): %v", err)
+	}
+	if string(bootstrapData) != "user bootstrap" {
+		t.Fatalf("expected BOOTSTRAP.md to be preserved, got %q", string(bootstrapData))
+	}
+	memoryData, err := os.ReadFile(filepath.Join(app.WorkingDir, "memory", "2026-05-06.md"))
+	if err != nil {
+		t.Fatalf("ReadFile(memory): %v", err)
+	}
+	if string(memoryData) != "user memory" {
+		t.Fatalf("expected workspace memory to be preserved, got %q", string(memoryData))
 	}
 
 	agentsData, err := os.ReadFile(filepath.Join(app.WorkingDir, "AGENTS.md"))

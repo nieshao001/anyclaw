@@ -272,6 +272,53 @@ func TestRequirePermissionApprovalHandlesPolicyAndExplicitTools(t *testing.T) {
 		}
 	})
 
+	t.Run("forced approval respects approval policy never", func(t *testing.T) {
+		manager, store, sessions := newTaskManagerTest(t, nil)
+		task, err := manager.Create(CreateOptions{Input: "run a safe command"})
+		if err != nil {
+			t.Fatalf("Create: %v", err)
+		}
+		session, err := sessions.Create("Task session", "main-agent", "org-1", "project-1", "workspace-1")
+		if err != nil {
+			t.Fatalf("Create session: %v", err)
+		}
+		cfg := dangerousConfig()
+		cfg.Permissions.ApprovalPolicy = tools.ApprovalPolicyNever
+		args := map[string]any{"command": "echo hi"}
+		action, decision := taskPermissionDecision(cfg, "run_command", args)
+
+		if err := manager.requirePermissionApproval(task, session, cfg, "run_command", args, action, decision, true); err != nil {
+			t.Fatalf("expected forced safe command to proceed under approval_policy=never, got %v", err)
+		}
+		if approvals := store.ListTaskApprovals(task.ID); len(approvals) != 0 {
+			t.Fatalf("did not expect approval request under approval_policy=never, got %#v", approvals)
+		}
+	})
+
+	t.Run("forced approval asks when policy permits prompts", func(t *testing.T) {
+		manager, store, sessions := newTaskManagerTest(t, nil)
+		task, err := manager.Create(CreateOptions{Input: "run a safe command"})
+		if err != nil {
+			t.Fatalf("Create: %v", err)
+		}
+		session, err := sessions.Create("Task session", "main-agent", "org-1", "project-1", "workspace-1")
+		if err != nil {
+			t.Fatalf("Create session: %v", err)
+		}
+		cfg := dangerousConfig()
+		cfg.Permissions.ApprovalPolicy = tools.ApprovalPolicyOnRequest
+		args := map[string]any{"command": "echo hi"}
+		action, decision := taskPermissionDecision(cfg, "run_command", args)
+
+		err = manager.requirePermissionApproval(task, session, cfg, "run_command", args, action, decision, true)
+		if err != ErrTaskWaitingApproval {
+			t.Fatalf("expected ErrTaskWaitingApproval, got %v", err)
+		}
+		if approvals := store.ListTaskApprovals(task.ID); len(approvals) != 1 {
+			t.Fatalf("expected approval request when policy permits prompts, got %#v", approvals)
+		}
+	})
+
 	t.Run("requests approval for dangerous tool", func(t *testing.T) {
 		manager, store, sessions := newTaskManagerTest(t, nil)
 		task, err := manager.Create(CreateOptions{Input: "run a command"})

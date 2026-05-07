@@ -31,16 +31,6 @@ var bootstrapFileOrder = []string{
 	"AGENTS.md",
 }
 
-var legacyBootstrapFiles = []string{
-	"SOUL.md",
-	"TOOLS.md",
-	"IDENTITY.md",
-	"USER.md",
-	"HEARTBEAT.md",
-	"BOOTSTRAP.md",
-	"MEMORY.md",
-}
-
 func EnsureBootstrap(dir string, opts BootstrapOptions) error {
 	dir = strings.TrimSpace(dir)
 	if dir == "" {
@@ -65,7 +55,7 @@ func EnsureBootstrap(dir string, opts BootstrapOptions) error {
 		}
 	}
 
-	return removeLegacyBootstrapFiles(dir)
+	return nil
 }
 
 func LoadBootstrapFiles(dir string, opts BootstrapOptions) ([]BootstrapFile, error) {
@@ -148,23 +138,6 @@ func defaultBootstrapTemplates(opts BootstrapOptions) map[string]string {
 - Before finishing, confirm that the requested artifact or state change actually exists.
 - Leave concise updates during longer tasks and report what changed, what was verified, and what remains blocked.`, name, bootstrapAgentContext(opts))),
 	}
-}
-
-func removeLegacyBootstrapFiles(dir string) error {
-	for _, name := range legacyBootstrapFiles {
-		if err := os.Remove(filepath.Join(dir, name)); err != nil && !os.IsNotExist(err) {
-			return err
-		}
-	}
-	memoryDir := filepath.Join(dir, "memory")
-	if info, err := os.Stat(memoryDir); err == nil && info.IsDir() {
-		if err := os.RemoveAll(memoryDir); err != nil && !os.IsNotExist(err) {
-			return err
-		}
-	} else if err != nil && !os.IsNotExist(err) {
-		return err
-	}
-	return nil
 }
 
 func bootstrapAgentContext(opts BootstrapOptions) string {
