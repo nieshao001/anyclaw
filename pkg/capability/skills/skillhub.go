@@ -9,7 +9,6 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
-	"strings"
 	"time"
 )
 
@@ -170,62 +169,10 @@ func ConvertSkillhubToSkillJSON(skillDir string) error {
 		return err
 	}
 
-	definition := buildSkillhubFileDefinition(skillDir, string(content))
+	definition := buildMarkdownSkillFileDefinition(string(content), filepath.Base(skillDir), nil)
+	definition.Source = "skillhub"
+	definition.Registry = "skillhub"
 	return writeSkillFile(skillDir, definition)
-}
-
-func buildSkillhubFileDefinition(skillDir string, content string) skillFileDefinition {
-	lines := strings.Split(content, "\n")
-	var name, description, systemPrompt strings.Builder
-	inFrontmatter := false
-	frontmatterDone := false
-
-	for _, line := range lines {
-		line = strings.TrimSpace(line)
-
-		if line == "---" {
-			if !inFrontmatter {
-				inFrontmatter = true
-				continue
-			} else {
-				frontmatterDone = true
-				continue
-			}
-		}
-
-		if inFrontmatter && !frontmatterDone {
-			if strings.HasPrefix(line, "name:") {
-				name.WriteString(strings.TrimSpace(strings.TrimPrefix(line, "name:")))
-			} else if strings.HasPrefix(line, "description:") {
-				description.WriteString(strings.TrimSpace(strings.TrimPrefix(line, "description:")))
-			}
-			continue
-		}
-
-		if frontmatterDone && line != "" {
-			systemPrompt.WriteString(line + "\n")
-		}
-	}
-
-	if name.Len() == 0 {
-		name.WriteString(filepath.Base(skillDir))
-	}
-	if description.Len() == 0 {
-		description.WriteString("Skill from Skillhub")
-	}
-	if systemPrompt.Len() == 0 {
-		systemPrompt.WriteString("You are a helpful assistant.")
-	}
-
-	return skillFileDefinition{
-		Name:        name.String(),
-		Description: description.String(),
-		Version:     "1.0.0",
-		Source:      "skillhub",
-		Prompts: map[string]string{
-			"system": strings.TrimSpace(systemPrompt.String()),
-		},
-	}
 }
 
 func IsSkillhubInstalled() bool {

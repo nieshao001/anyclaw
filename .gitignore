@@ -1,5 +1,7 @@
 node_modules
 .env
+.env.*
+!.env.example
 dist
 coverage
 __pycache__/
@@ -22,7 +24,17 @@ vendor/
 .agents/
 .agent/
 .claude/
+.codex/
 skills-lock.json
+*.pem
+*.key
+*.p12
+*.pfx
+*.sqlite
+*.sqlite3
+*.db
+*.db-shm
+*.db-wal
 
 # IDE
 .idea/
@@ -46,10 +58,19 @@ anyclaw.json.bak-*
 .anyclaw/
 workflows/memory/
 workflows/*/memory/
+workflows/*/.anyclaw/
 workflows/*/desktop_screenshot.png
+workflows/**/*screenshot*.png
+workflows/**/*observe*.png
+workflows/**/*running*.png
+workflows/**/*verify*.png
+workflows/**/*live*.png
+workflows/**/*capture*.png
 pkg/runtime/workflows/*/memory/
 workflows/.anyclaw-bootstrap-state.json
 workflows/BOOTSTRAP.md
+*.log
+*.err
 gateway.log
 gateway.err
 anyclaw-final

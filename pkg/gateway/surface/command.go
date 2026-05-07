@@ -8,7 +8,6 @@ import (
 
 	gatewaycommands "github.com/1024XEngineer/anyclaw/pkg/gateway/commands"
 	gatewaygovernance "github.com/1024XEngineer/anyclaw/pkg/gateway/governance"
-	chatintake "github.com/1024XEngineer/anyclaw/pkg/gateway/intake/chat"
 )
 
 // ChatIngressInput is the protocol-surface view of a chat.send business message.
@@ -60,21 +59,6 @@ func (Service) DecodeWSChatSend(params map[string]any) (gatewaycommands.ChatSend
 		WorkspaceID: mapString(params, "workspace"),
 	}
 	return req, gatewaycommands.NewChatSendCommandRequest(req)
-}
-
-// DecodeHTTPV2Chat parses the HTTP /v2/chat request at the protocol surface.
-func (Service) DecodeHTTPV2Chat(r *http.Request) (chatintake.ChatRequest, gatewaycommands.Request, error) {
-	if r == nil {
-		return chatintake.ChatRequest{}, gatewaycommands.Request{}, fmt.Errorf("request is required")
-	}
-	var req chatintake.ChatRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		return chatintake.ChatRequest{}, gatewaycommands.Request{}, fmt.Errorf("invalid request")
-	}
-	req.AgentName = strings.TrimSpace(req.AgentName)
-	req.Message = strings.TrimSpace(req.Message)
-	req.SessionID = strings.TrimSpace(req.SessionID)
-	return req, gatewaycommands.NewV2ChatCommandRequest(req), nil
 }
 
 // DecodeHTTPV2TaskCreate parses the HTTP /v2/tasks POST request at the protocol surface.
