@@ -60,10 +60,12 @@ func buildDecision(req RouteRequest, mode string, titlePrefix string) RouteDecis
 		decision.RouteKey = fmt.Sprintf("%s:%s:%d", req.Channel, req.Source, len(req.Text))
 	default:
 		decision.SessionMode = "per-chat"
-		decision.RouteKey = req.Channel + ":" + req.Source
+		if strings.TrimSpace(req.Source) != "" {
+			decision.RouteKey = req.Channel + ":" + req.Source
+		}
 	}
 
-	if strings.TrimSpace(req.ThreadID) != "" {
+	if strings.TrimSpace(req.ThreadID) != "" && strings.TrimSpace(decision.RouteKey) != "" {
 		decision.RouteKey = decision.RouteKey + ":thread:" + req.ThreadID
 		decision.ThreadID = req.ThreadID
 	}

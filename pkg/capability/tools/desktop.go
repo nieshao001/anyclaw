@@ -18,6 +18,11 @@ func DesktopOpenTool(ctx context.Context, input map[string]any, opts BuiltinOpti
 	}
 	kind, _ := input["kind"].(string)
 	browser, _ := input["browser"].(string)
+	target = strings.TrimSpace(target)
+	if isInvalidDesktopOpenTarget(target) {
+		return "", fmt.Errorf("desktop_open target is invalid: %q", target)
+	}
+	kind = normalizeDesktopOpenKind(target, kind)
 	if err := ensureDesktopAllowed(ctx, "desktop_open", opts, false); err != nil {
 		return "", err
 	}
@@ -26,8 +31,10 @@ func DesktopOpenTool(ctx context.Context, input map[string]any, opts BuiltinOpti
 			return "", err
 		}
 	}
-	command := desktopOpenCommand(strings.TrimSpace(target), strings.TrimSpace(kind), strings.TrimSpace(browser))
-	return runDesktopPowerShell(ctx, command)
+	if err := openDesktopTarget(ctx, target, kind, strings.TrimSpace(browser), opts.WorkingDir); err != nil {
+		return "", err
+	}
+	return desktopOpenResult(kind), nil
 }
 
 func DesktopTypeTool(ctx context.Context, input map[string]any, opts BuiltinOptions) (string, error) {
@@ -515,10 +522,7 @@ func DesktopScreenshotTool(ctx context.Context, input map[string]any, opts Built
 		return "", err
 	}
 	resolved := resolvePath(path, opts.WorkingDir)
-	if err := validateProtectedPath(resolved, opts.ProtectedPaths); err != nil {
-		return "", err
-	}
-	if err := ensureWriteAllowed(resolved, opts.WorkingDir, opts.PermissionLevel); err != nil {
+	if err := CheckPermission(ctx, opts, PermissionAction{Kind: "write", ToolName: "desktop_screenshot", Path: resolved}); err != nil {
 		return "", err
 	}
 	if err := os.MkdirAll(filepath.Dir(resolved), 0o755); err != nil {
@@ -546,10 +550,7 @@ func DesktopScreenshotWindowTool(ctx context.Context, input map[string]any, opts
 		}
 	}
 	resolved := resolvePath(path, opts.WorkingDir)
-	if err := validateProtectedPath(resolved, opts.ProtectedPaths); err != nil {
-		return "", err
-	}
-	if err := ensureWriteAllowed(resolved, opts.WorkingDir, opts.PermissionLevel); err != nil {
+	if err := CheckPermission(ctx, opts, PermissionAction{Kind: "write", ToolName: "desktop_screenshot_window", Path: resolved}); err != nil {
 		return "", err
 	}
 	if err := os.MkdirAll(filepath.Dir(resolved), 0o755); err != nil {
@@ -611,12 +612,14 @@ func ensureDesktopAllowed(ctx context.Context, toolName string, opts BuiltinOpti
 	if runtime.GOOS != "windows" {
 		return fmt.Errorf("%s is currently supported on Windows host mode only", toolName)
 	}
-	mode := strings.TrimSpace(strings.ToLower(opts.ExecutionMode))
-	if mode != "host-reviewed" && !HasHostReviewedCapability(ctx, HostReviewedCapabilityDesktop) {
-		return fmt.Errorf("%s requires sandbox.execution_mode=host-reviewed", toolName)
+	if !strings.EqualFold(strings.TrimSpace(opts.ExecutionMode), "host-reviewed") && !HasHostReviewedCapability(ctx, HostReviewedCapabilityDesktop) {
+		return fmt.Errorf("%s requires host-reviewed desktop access", toolName)
 	}
-	if !allowReadOnly && strings.TrimSpace(strings.ToLower(opts.PermissionLevel)) == "read-only" {
+	if strings.EqualFold(strings.TrimSpace(opts.PermissionLevel), "read-only") && !allowReadOnly {
 		return fmt.Errorf("permission denied: current agent is read-only")
+	}
+	if err := CheckPermission(ctx, opts, PermissionAction{Kind: "desktop", ToolName: toolName, Capability: HostReviewedCapabilityDesktop}); err != nil {
+		return err
 	}
 	return nil
 }
@@ -627,6 +630,7 @@ func runDesktopPowerShell(ctx context.Context, script string) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	hideCommandWindow(cmd)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return "", fmt.Errorf("desktop action failed: %w - %s", err, string(output))
@@ -646,20 +650,71 @@ func utf16LE(s string) []byte {
 	return buf
 }
 
-func desktopOpenCommand(target string, kind string, browser string) string {
+func normalizeDesktopOpenKind(target string, kind string) string {
 	switch strings.ToLower(strings.TrimSpace(kind)) {
 	case "url":
-		if strings.EqualFold(strings.TrimSpace(browser), "edge") || strings.EqualFold(strings.TrimSpace(browser), "msedge") {
-			return fmt.Sprintf(`Start-Process "msedge.exe" -ArgumentList %s; "opened url"`, powerShellString(target))
-		}
-		return fmt.Sprintf(`Start-Process %s; "opened url"`, powerShellString(target))
+		return "url"
 	case "file":
-		return fmt.Sprintf(`Invoke-Item %s; "opened file"`, powerShellString(target))
+		return "file"
 	case "app":
-		return fmt.Sprintf(`Start-Process %s; "started app"`, powerShellString(target))
+		return "app"
 	default:
-		return fmt.Sprintf(`Start-Process %s; "opened target"`, powerShellString(target))
+		if isDesktopOpenURL(target) {
+			return "url"
+		}
+		if looksLikeDesktopOpenFile(target) {
+			return "file"
+		}
+		return "app"
 	}
+}
+
+func desktopOpenResult(kind string) string {
+	switch strings.ToLower(strings.TrimSpace(kind)) {
+	case "url":
+		return "opened url"
+	case "file":
+		return "opened file"
+	case "app":
+		return "started app"
+	default:
+		return "opened target"
+	}
+}
+
+func isDesktopOpenURL(target string) bool {
+	lower := strings.ToLower(strings.TrimSpace(target))
+	return strings.HasPrefix(lower, "http://") || strings.HasPrefix(lower, "https://")
+}
+
+func looksLikeDesktopOpenFile(target string) bool {
+	target = strings.TrimSpace(target)
+	if target == "" || isDesktopOpenURL(target) || isInvalidDesktopOpenTarget(target) {
+		return false
+	}
+	if strings.ContainsAny(target, `/\`) {
+		return true
+	}
+	return filepath.Ext(target) != ""
+}
+
+func isInvalidDesktopOpenTarget(target string) bool {
+	target = strings.TrimSpace(target)
+	if target == "" {
+		return true
+	}
+	onlySeparators := true
+	for _, r := range target {
+		if r != '\\' && r != '/' {
+			onlySeparators = false
+			break
+		}
+	}
+	if onlySeparators {
+		return true
+	}
+	cleaned := filepath.Clean(target)
+	return cleaned == "." || cleaned == string(filepath.Separator)
 }
 
 func powerShellString(value string) string {

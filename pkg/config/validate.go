@@ -22,8 +22,24 @@ func (c *Config) Validate() error {
 		errs = append(errs, "llm.temperature must be between 0.0 and 2.0")
 	}
 
+	validSandboxModes := map[string]bool{"read-only": true, "workspace-write": true, "danger-full-access": true}
+	if !validSandboxModes[c.Permissions.SandboxMode] {
+		errs = append(errs, fmt.Sprintf("permissions.sandbox_mode must be one of: read-only, workspace-write, danger-full-access (got %q)", c.Permissions.SandboxMode))
+	}
+	validApprovalPolicies := map[string]bool{"untrusted": true, "on-request": true, "on-failure": true, "never": true}
+	if !validApprovalPolicies[c.Permissions.ApprovalPolicy] {
+		errs = append(errs, fmt.Sprintf("permissions.approval_policy must be one of: untrusted, on-request, on-failure, never (got %q)", c.Permissions.ApprovalPolicy))
+	}
+	validNetworkAccess := map[string]bool{"enabled": true, "disabled": true}
+	if !validNetworkAccess[c.Permissions.NetworkAccess] {
+		errs = append(errs, fmt.Sprintf("permissions.network_access must be one of: enabled, disabled (got %q)", c.Permissions.NetworkAccess))
+	}
+	validDesktopAccess := map[string]bool{"disabled": true, "ask-once-per-session": true, "always": true}
+	if !validDesktopAccess[c.Permissions.DesktopAccess] {
+		errs = append(errs, fmt.Sprintf("permissions.desktop_access must be one of: disabled, ask-once-per-session, always (got %q)", c.Permissions.DesktopAccess))
+	}
 	validPermLevels := map[string]bool{"full": true, "limited": true, "read-only": true}
-	if c.Agent.PermissionLevel != "" && !validPermLevels[c.Agent.PermissionLevel] {
+	if !validPermLevels[c.Agent.PermissionLevel] {
 		errs = append(errs, fmt.Sprintf("agent.permission_level must be one of: full, limited, read-only (got %q)", c.Agent.PermissionLevel))
 	}
 	for i, provider := range c.Providers {
@@ -75,11 +91,6 @@ func (c *Config) Validate() error {
 	if c.Security.CommandTimeoutSeconds < 0 {
 		errs = append(errs, fmt.Sprintf("security.command_timeout_seconds must be >= 0 (got %d)", c.Security.CommandTimeoutSeconds))
 	}
-	validDesktopApprovalScopes := map[string]bool{"capability": true, "tool_call": true}
-	if c.Security.DesktopApprovalScope != "" && !validDesktopApprovalScopes[c.Security.DesktopApprovalScope] {
-		errs = append(errs, fmt.Sprintf("security.desktop_approval_scope must be one of: capability, tool_call (got %q)", c.Security.DesktopApprovalScope))
-	}
-
 	if c.Plugins.ExecTimeoutSeconds < 0 {
 		errs = append(errs, fmt.Sprintf("plugins.exec_timeout_seconds must be >= 0 (got %d)", c.Plugins.ExecTimeoutSeconds))
 	}
@@ -92,7 +103,10 @@ func (c *Config) Validate() error {
 	if c.Sandbox.ExecutionMode != "" && !validExecutionModes[c.Sandbox.ExecutionMode] {
 		errs = append(errs, fmt.Sprintf("sandbox.execution_mode must be one of: sandbox, host-reviewed (got %q)", c.Sandbox.ExecutionMode))
 	}
-
+	validDesktopApprovalScopes := map[string]bool{"capability": true, "tool_call": true}
+	if c.Security.DesktopApprovalScope != "" && !validDesktopApprovalScopes[c.Security.DesktopApprovalScope] {
+		errs = append(errs, fmt.Sprintf("security.desktop_approval_scope must be one of: capability, tool_call (got %q)", c.Security.DesktopApprovalScope))
+	}
 	validComputerBackends := map[string]bool{"codex_local": true}
 	if c.Computer.Backend != "" && !validComputerBackends[c.Computer.Backend] {
 		errs = append(errs, fmt.Sprintf("computer.backend must be codex_local (got %q)", c.Computer.Backend))

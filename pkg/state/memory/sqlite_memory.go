@@ -18,10 +18,11 @@ import (
 )
 
 type SQLiteMemory struct {
-	db      *sql.DB
-	baseDir string
-	mu      sync.RWMutex
-	ctx     context.Context
+	db       *sql.DB
+	baseDir  string
+	dailyDir string
+	mu       sync.RWMutex
+	ctx      context.Context
 
 	embedder   EmbeddingProvider
 	dimensions int
@@ -51,7 +52,7 @@ func NewSQLiteMemory(workDir string, dsn string, opts ...SQLiteMemoryOption) (*S
 	if dsn == "" {
 		dsn = workDir + "/memory.db"
 	}
-	m := &SQLiteMemory{baseDir: workDir, ctx: context.Background(), dimensions: 1536}
+	m := &SQLiteMemory{baseDir: workDir, dailyDir: filepath.Join(workDir, "daily"), ctx: context.Background(), dimensions: 1536}
 	for _, opt := range opts {
 		opt(m)
 	}
@@ -68,6 +69,9 @@ func (m *SQLiteMemory) InitWithDSN(dsn string) error {
 
 	if dsn == "" {
 		dsn = m.baseDir + "/memory.db"
+	}
+	if err := os.MkdirAll(filepath.Dir(dsn), 0o755); err != nil {
+		return fmt.Errorf("failed to create SQLite memory directory: %w", err)
 	}
 
 	db, err := sql.Open("sqlite", dsn)
@@ -152,6 +156,9 @@ func (m *SQLiteMemory) Add(entry MemoryEntry) error {
 	if err != nil {
 		return fmt.Errorf("failed to insert memory: %w", err)
 	}
+	if err := m.appendDailyMarkdownLocked(entry); err != nil {
+		return err
+	}
 
 	if m.embedder != nil && strings.TrimSpace(entry.Content) != "" {
 		go func(id string, content string) {
@@ -166,6 +173,44 @@ func (m *SQLiteMemory) Add(entry MemoryEntry) error {
 	}
 
 	return nil
+}
+
+func (m *SQLiteMemory) SetDailyDir(dir string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	dir = strings.TrimSpace(dir)
+	if dir == "" {
+		m.dailyDir = filepath.Join(m.baseDir, "daily")
+		return
+	}
+	m.dailyDir = filepath.Clean(dir)
+}
+
+func (m *SQLiteMemory) DailyDir() string {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	if strings.TrimSpace(m.dailyDir) == "" {
+		return filepath.Join(m.baseDir, "daily")
+	}
+	return m.dailyDir
+}
+
+func (m *SQLiteMemory) SearchDaily(query string, limit int, dayRef string) ([]DailyMemoryMatch, error) {
+	return SearchDailyMarkdown(m.DailyDir(), query, limit, dayRef)
+}
+
+func (m *SQLiteMemory) GetDaily(dayRef string) (*DailyMemoryFile, error) {
+	return GetDailyMarkdown(m.DailyDir(), dayRef)
+}
+
+func (m *SQLiteMemory) appendDailyMarkdownLocked(entry MemoryEntry) error {
+	dailyDir := strings.TrimSpace(m.dailyDir)
+	if dailyDir == "" {
+		dailyDir = filepath.Join(m.baseDir, "daily")
+	}
+	return appendDailyMarkdownFile(dailyDir, entry)
 }
 
 func (m *SQLiteMemory) Get(id string) (*MemoryEntry, error) {

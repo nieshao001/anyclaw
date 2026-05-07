@@ -197,3 +197,41 @@ func TestSessionResolverCreatesSessionWhenStoreSupportsCreate(t *testing.T) {
 		t.Fatalf("expected create conversation key telegram:chat-77, got %#v", store.createCalls[0])
 	}
 }
+
+func TestSessionResolverDoesNotReuseActorForFreshChatEntry(t *testing.T) {
+	store := &stubSessionStore{}
+	resolver := SessionResolver{Sessions: store}
+
+	for i := 0; i < 2; i++ {
+		resolution, _, _, err := resolver.Resolve(MainRouteRequest{
+			Text: "fresh web chat",
+			Actor: MessageActor{
+				UserID: "local-admin",
+			},
+			Scope: MessageScope{
+				EntryPoint: "chat",
+				ChannelID:  "api",
+			},
+		}, RouteDecision{
+			SessionMode: "per-chat",
+			TitleHint:   "Web Chat",
+		}, AgentResolution{
+			AgentName: "AnyClaw",
+		})
+		if err != nil {
+			t.Fatalf("Resolve call %d: %v", i+1, err)
+		}
+		if !resolution.Created {
+			t.Fatalf("expected call %d to create a session, got %+v", i+1, resolution)
+		}
+	}
+
+	if len(store.createCalls) != 2 {
+		t.Fatalf("expected two independent chat session creates, got %d", len(store.createCalls))
+	}
+	for i, call := range store.createCalls {
+		if call.ConversationKey != "" {
+			t.Fatalf("expected create call %d to omit conversation key, got %#v", i+1, call)
+		}
+	}
+}

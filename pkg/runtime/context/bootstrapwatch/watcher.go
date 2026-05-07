@@ -77,10 +77,7 @@ func DefaultWatcherConfig(baseDir string) WatcherConfig {
 		PollInterval: 2 * time.Second,
 		AutoLoad:     true,
 		Files: []FileType{
-			FileAgents, FileSoul, FileTools,
-			FileIdentity, FileUser, FileHeartbeat,
-			FileBootstrap, FileRules,
-			FileMemory, FileSkills, FileCommands,
+			FileAgents, FileRules, FileSkills, FileCommands,
 		},
 	}
 }
@@ -262,10 +259,7 @@ func (w *Watcher) checkChanges() {
 
 	// Check for new files
 	for _, ft := range []FileType{
-		FileAgents, FileSoul, FileTools,
-		FileIdentity, FileUser, FileHeartbeat,
-		FileBootstrap, FileRules,
-		FileMemory, FileSkills, FileCommands,
+		FileAgents, FileRules, FileSkills, FileCommands,
 	} {
 		if _, exists := w.files[ft]; exists {
 			continue

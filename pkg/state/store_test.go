@@ -94,6 +94,121 @@ func TestNewStorePrunesOrphanedSessionApprovals(t *testing.T) {
 	}
 }
 
+func TestNewStorePrunesLegacyAllowedPendingRunCommandApprovals(t *testing.T) {
+	dir := t.TempDir()
+	stateFile := filepath.Join(dir, "state.json")
+	payload := persistedState{
+		Sessions: []*Session{
+			{
+				ID:         "sess-live",
+				Title:      "Live",
+				Presence:   "waiting_approval",
+				Typing:     true,
+				QueueDepth: 1,
+				CreatedAt:  time.Now().UTC(),
+				UpdatedAt:  time.Now().UTC(),
+			},
+		},
+		Approvals: []*Approval{
+			{
+				ID:        "approval-old-run-command",
+				SessionID: "sess-live",
+				ToolName:  "run_command",
+				Action:    "tool_call",
+				Payload: map[string]any{
+					"permission_kind":   "execute",
+					"permission_reason": "",
+					"command":           "dir *.html *.css *.js",
+				},
+				Signature:   "sig-old",
+				Status:      "pending",
+				RequestedAt: time.Now().UTC(),
+			},
+		},
+		Events:     []*Event{},
+		Tools:      []*ToolActivityRecord{},
+		Audit:      []*AuditEvent{},
+		Orgs:       []*Org{},
+		Projects:   []*Project{},
+		Workspaces: []*Workspace{},
+		Jobs:       []*Job{},
+		Updated:    time.Now().UTC(),
+	}
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	if err := os.WriteFile(stateFile, raw, 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	store, err := NewStore(dir)
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+
+	if approvals := store.ListApprovals(""); len(approvals) != 0 {
+		t.Fatalf("expected legacy allowed approval to be pruned, got %#v", approvals)
+	}
+	session, ok := store.GetSession("sess-live")
+	if !ok || session == nil {
+		t.Fatal("expected session to remain")
+	}
+	if session.Presence != "idle" || session.Typing || session.QueueDepth != 0 {
+		t.Fatalf("expected session waiting state to be cleared, got presence=%q typing=%v queue=%d", session.Presence, session.Typing, session.QueueDepth)
+	}
+}
+
+func TestNewStoreKeepsDangerousPendingRunCommandApprovals(t *testing.T) {
+	dir := t.TempDir()
+	stateFile := filepath.Join(dir, "state.json")
+	payload := persistedState{
+		Sessions: []*Session{
+			{ID: "sess-live", Title: "Live", CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC()},
+		},
+		Approvals: []*Approval{
+			{
+				ID:        "approval-dangerous-run-command",
+				SessionID: "sess-live",
+				ToolName:  "run_command",
+				Action:    "tool_call",
+				Payload: map[string]any{
+					"permission_kind": "execute",
+					"command":         "rm -rf .",
+				},
+				Signature:   "sig-dangerous",
+				Status:      "pending",
+				RequestedAt: time.Now().UTC(),
+			},
+		},
+		Events:     []*Event{},
+		Tools:      []*ToolActivityRecord{},
+		Audit:      []*AuditEvent{},
+		Orgs:       []*Org{},
+		Projects:   []*Project{},
+		Workspaces: []*Workspace{},
+		Jobs:       []*Job{},
+		Updated:    time.Now().UTC(),
+	}
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	if err := os.WriteFile(stateFile, raw, 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	store, err := NewStore(dir)
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+
+	approvals := store.ListApprovals("")
+	if len(approvals) != 1 || approvals[0].ID != "approval-dangerous-run-command" {
+		t.Fatalf("expected dangerous approval to remain, got %#v", approvals)
+	}
+}
+
 func TestNewStoreRepairsPendingSessionMessageFromApprovalPayload(t *testing.T) {
 	dir := t.TempDir()
 	stateFile := filepath.Join(dir, "state.json")

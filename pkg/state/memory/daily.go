@@ -123,6 +123,10 @@ func (m *FileMemory) appendDailyMarkdownLocked(entry MemoryEntry) error {
 	if dailyDir == "" {
 		dailyDir = m.baseDir
 	}
+	return appendDailyMarkdownFile(dailyDir, entry)
+}
+
+func appendDailyMarkdownFile(dailyDir string, entry MemoryEntry) error {
 	if err := os.MkdirAll(dailyDir, 0o755); err != nil {
 		return err
 	}

@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strings"
 	"time"
@@ -50,10 +51,13 @@ func ReadFileToolWithPolicy(ctx context.Context, input map[string]any, cwd strin
 	}
 	resolved := resolvePath(path, cwd)
 	if opts.Policy != nil {
-		if err := opts.Policy.CheckReadPath(resolved); err != nil {
+		action := PermissionAction{Kind: "read", ToolName: "read_file", Path: resolved}
+		if HasPermissionActionGrant(ctx, action) {
+			// granted by the active approval flow
+		} else if err := opts.Policy.CheckReadPath(resolved); err != nil {
 			return "", err
 		}
-	} else if err := validateProtectedPath(resolved, opts.ProtectedPaths); err != nil {
+	} else if err := CheckPermission(ctx, opts, PermissionAction{Kind: "read", ToolName: "read_file", Path: resolved}); err != nil {
 		return "", err
 	}
 	return ReadFileToolWithCwd(ctx, input, cwd)
@@ -121,7 +125,13 @@ func WriteFileToolWithPolicy(ctx context.Context, input map[string]any, cwd stri
 	}
 	resolved := resolvePath(path, cwd)
 	if opts.Policy != nil {
-		if err := opts.Policy.CheckWritePath(resolved); err != nil {
+		if HasPermissionActionGrant(ctx, PermissionAction{Kind: "write", ToolName: "write_file", Path: resolved}) {
+			// granted by the active approval flow
+		} else if err := opts.Policy.CheckWritePath(resolved); err != nil {
+			return "", err
+		}
+	} else if opts.PermissionEngine != nil {
+		if err := CheckPermission(ctx, opts, PermissionAction{Kind: "write", ToolName: "write_file", Path: resolved}); err != nil {
 			return "", err
 		}
 	} else {
@@ -129,7 +139,7 @@ func WriteFileToolWithPolicy(ctx context.Context, input map[string]any, cwd stri
 			return "", err
 		}
 	}
-	return WriteFileToolWithCwd(ctx, input, cwd, opts.PermissionLevel)
+	return WriteFileToolWithCwd(ctx, input, cwd, SandboxModeDangerFullAccess)
 }
 
 func ListDirectoryTool(ctx context.Context, input map[string]any) (string, error) {
@@ -143,10 +153,13 @@ func ListDirectoryToolWithPolicy(ctx context.Context, input map[string]any, cwd 
 	}
 	resolved := resolvePath(path, cwd)
 	if opts.Policy != nil {
-		if err := opts.Policy.CheckReadPath(resolved); err != nil {
+		action := PermissionAction{Kind: "read", ToolName: "list_directory", Path: resolved}
+		if HasPermissionActionGrant(ctx, action) {
+			// granted by the active approval flow
+		} else if err := opts.Policy.CheckReadPath(resolved); err != nil {
 			return "", err
 		}
-	} else if err := validateProtectedPath(resolved, opts.ProtectedPaths); err != nil {
+	} else if err := CheckPermission(ctx, opts, PermissionAction{Kind: "read", ToolName: "list_directory", Path: resolved}); err != nil {
 		return "", err
 	}
 	return ListDirectoryToolWithCwd(ctx, input, cwd)
@@ -201,10 +214,13 @@ func SearchFilesToolWithPolicy(ctx context.Context, input map[string]any, cwd st
 	}
 	resolved := resolvePath(root, cwd)
 	if opts.Policy != nil {
-		if err := opts.Policy.CheckReadPath(resolved); err != nil {
+		action := PermissionAction{Kind: "read", ToolName: "search_files", Path: resolved}
+		if HasPermissionActionGrant(ctx, action) {
+			// granted by the active approval flow
+		} else if err := opts.Policy.CheckReadPath(resolved); err != nil {
 			return "", err
 		}
-	} else if err := validateProtectedPath(resolved, opts.ProtectedPaths); err != nil {
+	} else if err := CheckPermission(ctx, opts, PermissionAction{Kind: "read", ToolName: "search_files", Path: resolved}); err != nil {
 		return "", err
 	}
 	return SearchFilesToolWithCwd(ctx, input, cwd)
@@ -264,16 +280,15 @@ func RunCommandToolWithPolicy(ctx context.Context, input map[string]any, opts Bu
 	if cwd == "" {
 		cwd = opts.WorkingDir
 	}
-	if isDangerousCommand(cmdStr, opts.DangerousPatterns) && opts.ConfirmDangerousCommand != nil {
-		if !opts.ConfirmDangerousCommand(cmdStr) {
-			return "", fmt.Errorf("dangerous command cancelled by user")
-		}
-	}
-	if opts.PermissionLevel == "read-only" {
-		return "", fmt.Errorf("permission denied: current agent is read-only")
-	}
 	if opts.Policy != nil {
-		if err := opts.Policy.CheckCommandCwd(firstNonEmptyCommandCwd(cwd, opts.WorkingDir)); err != nil {
+		action := PermissionAction{Kind: "execute", ToolName: "run_command", Command: cmdStr, CWD: firstNonEmptyCommandCwd(cwd, opts.WorkingDir)}
+		if HasPermissionActionGrant(ctx, action) {
+			// granted by the active approval flow
+		} else if err := opts.Policy.CheckCommandCwd(firstNonEmptyCommandCwd(cwd, opts.WorkingDir)); err != nil {
+			return "", err
+		}
+	} else if opts.PermissionEngine != nil {
+		if err := CheckPermission(ctx, opts, PermissionAction{Kind: "execute", ToolName: "run_command", Command: cmdStr, CWD: firstNonEmptyCommandCwd(cwd, opts.WorkingDir)}); err != nil {
 			return "", err
 		}
 	}
@@ -292,16 +307,18 @@ func RunCommandToolWithPolicy(ctx context.Context, input map[string]any, opts Bu
 		return shellCommandWithShell(cmdCtx, command, shellName)
 	}
 	applyDir := true
-	sandboxCwd, factory, err := opts.Sandbox.ResolveExecution(ctx, cwd)
-	if err != nil {
-		return "", err
-	}
-	if factory != nil {
-		commandFactory = factory
-		applyDir = false
-	}
-	if sandboxCwd != "" {
-		resolvedCwd = sandboxCwd
+	if opts.Sandbox != nil {
+		sandboxCwd, factory, err := opts.Sandbox.ResolveExecution(ctx, cwd)
+		if err != nil {
+			return "", err
+		}
+		if factory != nil {
+			commandFactory = factory
+			applyDir = false
+		}
+		if sandboxCwd != "" {
+			resolvedCwd = sandboxCwd
+		}
 	}
 
 	cmd, err := commandFactory(ctx, cmdStr)
@@ -422,7 +439,17 @@ func ensureWriteAllowed(targetPath string, workingDir string, permissionLevel st
 func isDangerousCommand(command string, patterns []string) bool {
 	lower := strings.ToLower(strings.TrimSpace(command))
 	for _, pattern := range patterns {
-		if strings.Contains(lower, strings.ToLower(strings.TrimSpace(pattern))) {
+		pattern = strings.TrimSpace(pattern)
+		if pattern == "" {
+			continue
+		}
+		if re, err := regexp.Compile("(?i)" + pattern); err == nil {
+			if re.MatchString(command) {
+				return true
+			}
+			continue
+		}
+		if strings.Contains(lower, strings.ToLower(pattern)) {
 			return true
 		}
 	}
@@ -430,25 +457,14 @@ func isDangerousCommand(command string, patterns []string) bool {
 }
 
 func reviewCommandExecution(command string, cwd string, opts BuiltinOptions) error {
-	mode := strings.TrimSpace(strings.ToLower(opts.ExecutionMode))
-	if mode == "" {
-		mode = "sandbox"
+	if strings.EqualFold(strings.TrimSpace(opts.ExecutionMode), "sandbox") && (opts.Sandbox == nil || !opts.Sandbox.Enabled()) {
+		return fmt.Errorf("command execution requires an active sandbox or host-reviewed mode")
 	}
-	sandboxEnabled := opts.Sandbox != nil && opts.Sandbox.Enabled()
-	if mode == "sandbox" && !sandboxEnabled {
-		return fmt.Errorf("host execution denied: sandbox.execution_mode is sandbox and sandbox is not enabled")
+	if isDangerousCommand(command, opts.DangerousPatterns) {
+		return fmt.Errorf("command requires approval: dangerous command pattern matched")
 	}
-	if mode != "host-reviewed" || sandboxEnabled {
-		return nil
-	}
-	if strings.TrimSpace(cwd) != "" {
-		if err := validateProtectedPath(resolvePath(cwd, opts.WorkingDir), opts.ProtectedPaths); err != nil {
-			return fmt.Errorf("host execution denied: %w", err)
-		}
-	}
-	allowedCommandPaths := mergePathLists(opts.WorkingDir, opts.AllowedReadPaths, opts.AllowedWritePaths)
-	if err := validateCommandAgainstProtectedPaths(command, opts.ProtectedPaths, allowedCommandPaths); err != nil {
-		return fmt.Errorf("host execution denied: %w", err)
+	if err := validateCommandAgainstProtectedPaths(command, opts.ProtectedPaths, mergePathLists(opts.WorkingDir, opts.AllowedReadPaths, opts.AllowedWritePaths)); err != nil {
+		return err
 	}
 	return nil
 }
@@ -610,9 +626,14 @@ func WebSearchToolWithPolicy(ctx context.Context, input map[string]any, opts Bui
 	}
 
 	if opts.Policy != nil {
-		if err := opts.Policy.CheckEgressURL(webtool.SearchEndpoint); err != nil {
+		action := PermissionAction{Kind: "network", ToolName: "web_search", URL: webtool.SearchEndpoint}
+		if HasPermissionActionGrant(ctx, action) {
+			// granted by the active approval flow
+		} else if err := opts.Policy.CheckEgressURL(webtool.SearchEndpoint); err != nil {
 			return "", err
 		}
+	} else if err := CheckPermission(ctx, opts, PermissionAction{Kind: "network", ToolName: "web_search", URL: webtool.SearchEndpoint}); err != nil {
+		return "", err
 	}
 
 	maxResults := 5
@@ -648,9 +669,14 @@ func FetchURLToolWithPolicy(ctx context.Context, input map[string]any, opts Buil
 	}
 
 	if opts.Policy != nil {
-		if err := opts.Policy.CheckEgressURL(urlStr); err != nil {
+		action := PermissionAction{Kind: "network", ToolName: "fetch_url", URL: urlStr}
+		if HasPermissionActionGrant(ctx, action) {
+			// granted by the active approval flow
+		} else if err := opts.Policy.CheckEgressURL(urlStr); err != nil {
 			return "", err
 		}
+	} else if err := CheckPermission(ctx, opts, PermissionAction{Kind: "network", ToolName: "fetch_url", URL: urlStr}); err != nil {
+		return "", err
 	}
 
 	content, err := webtool.Fetch(ctx, urlStr)

@@ -316,7 +316,7 @@ func applyPatchText(ctx context.Context, patch string, opts BuiltinOptions) (app
 			summary.Added = appendPatchSummaryPath(summary.Added, path)
 		case strings.HasPrefix(line, "*** Delete File: "):
 			path := cleanPatchPath(strings.TrimPrefix(line, "*** Delete File: "))
-			if err := removePatchFile(path, opts); err != nil {
+			if err := removePatchFile(ctx, path, opts); err != nil {
 				return applyPatchCompatSummary{}, err
 			}
 			summary.Deleted = appendPatchSummaryPath(summary.Deleted, path)
@@ -387,7 +387,7 @@ func applyPatchText(ctx context.Context, patch string, opts BuiltinOptions) (app
 				if err := writePatchFile(ctx, movePath, updated, opts); err != nil {
 					return applyPatchCompatSummary{}, err
 				}
-				if err := removePatchFile(path, opts); err != nil {
+				if err := removePatchFile(ctx, path, opts); err != nil {
 					return applyPatchCompatSummary{}, err
 				}
 				targetPath = movePath
@@ -581,19 +581,19 @@ func writePatchFile(ctx context.Context, path string, content string, opts Built
 	return err
 }
 
-func removePatchFile(path string, opts BuiltinOptions) error {
+func removePatchFile(ctx context.Context, path string, opts BuiltinOptions) error {
 	if strings.TrimSpace(path) == "" {
 		return fmt.Errorf("path is required")
 	}
 	resolved := resolvePath(path, opts.WorkingDir)
 	if opts.Policy != nil {
-		if err := opts.Policy.CheckWritePath(resolved); err != nil {
+		action := PermissionAction{Kind: "delete", ToolName: "apply_patch", Path: resolved}
+		if HasPermissionActionGrant(ctx, action) {
+			// granted by the active approval flow
+		} else if err := opts.Policy.CheckWritePath(resolved); err != nil {
 			return err
 		}
-	} else if err := validateProtectedPath(resolved, opts.ProtectedPaths); err != nil {
-		return err
-	}
-	if err := ensureWriteAllowed(resolved, opts.WorkingDir, opts.PermissionLevel); err != nil {
+	} else if err := CheckPermission(ctx, opts, PermissionAction{Kind: "delete", ToolName: "apply_patch", Path: resolved}); err != nil {
 		return err
 	}
 	if err := os.Remove(resolved); err != nil {
@@ -699,6 +699,7 @@ func sessionStatusCompatTool(ctx context.Context, input map[string]any, opts Bui
 	now := time.Now()
 	scope := sandboxScopeFromContext(ctx)
 	caller := ToolCallerFromContext(ctx)
+	permissionOptions := NormalizePermissionOptions(opts.Permissions)
 	output := map[string]any{
 		"status":           "ok",
 		"current_time":     now.Format(time.RFC3339),
@@ -714,7 +715,13 @@ func sessionStatusCompatTool(ctx context.Context, input map[string]any, opts Bui
 		"working_dir":      opts.WorkingDir,
 		"permission_level": opts.PermissionLevel,
 		"execution_mode":   opts.ExecutionMode,
-		"sandbox_enabled":  opts.Sandbox != nil && opts.Sandbox.Enabled(),
+		"permissions": map[string]any{
+			"sandbox_mode":    permissionOptions.SandboxMode,
+			"approval_policy": permissionOptions.ApprovalPolicy,
+			"network_access":  permissionOptions.NetworkAccess,
+			"desktop_access":  permissionOptions.DesktopAccess,
+		},
+		"sandbox_enabled": opts.Sandbox != nil && opts.Sandbox.Enabled(),
 	}
 	if requested := firstStringInput(input, "sessionKey", "session_key"); strings.TrimSpace(requested) != "" {
 		output["requested_session_key"] = strings.TrimSpace(requested)
@@ -836,7 +843,7 @@ func RegisterMemoryTools(r *Registry, opts BuiltinOptions) {
 
 	r.RegisterTool(
 		"memory_search",
-		"Search memory entries. Uses the memory backend (SQLite/dual) when available, falls back to daily memory files.",
+		"Search Codex-style runtime memory entries. Uses the runtime memory backend when available, with runtime daily files as a secondary view.",
 		map[string]any{
 			"type": "object",
 			"properties": map[string]any{
@@ -848,7 +855,7 @@ func RegisterMemoryTools(r *Registry, opts BuiltinOptions) {
 		},
 		func(ctx context.Context, input map[string]any) (string, error) {
 			return auditCall(opts, "memory_search", input, func(ctx context.Context, input map[string]any) (string, error) {
-				return MemorySearchToolWithBackend(ctx, input, workingDir, opts.MemoryBackend)
+				return MemorySearchToolWithBackendAndDailyDir(ctx, input, workingDir, opts.MemoryBackend, opts.DailyMemoryDir)
 			})(ctx, input)
 		},
 	)
@@ -871,7 +878,7 @@ func RegisterMemoryTools(r *Registry, opts BuiltinOptions) {
 				if vec, ok := opts.MemoryBackend.(memory.VectorBackend); ok {
 					return MemoryVectorSearchTool(ctx, input, opts.MemoryBackend, vec)
 				}
-				return MemorySearchToolWithBackend(ctx, input, workingDir, opts.MemoryBackend)
+				return MemorySearchToolWithBackendAndDailyDir(ctx, input, workingDir, opts.MemoryBackend, opts.DailyMemoryDir)
 			})(ctx, input)
 		},
 	)
@@ -894,24 +901,24 @@ func RegisterMemoryTools(r *Registry, opts BuiltinOptions) {
 				if vec, ok := opts.MemoryBackend.(memory.VectorBackend); ok {
 					return MemoryHybridSearchTool(ctx, input, opts.MemoryBackend, vec)
 				}
-				return MemorySearchToolWithBackend(ctx, input, workingDir, opts.MemoryBackend)
+				return MemorySearchToolWithBackendAndDailyDir(ctx, input, workingDir, opts.MemoryBackend, opts.DailyMemoryDir)
 			})(ctx, input)
 		},
 	)
 
 	r.RegisterTool(
 		"memory_get",
-		"Read a specific daily workspace memory file from memory/*.md",
+		"Read a specific Codex-style runtime memory entry by id or a runtime daily memory file by date",
 		map[string]any{
 			"type": "object",
 			"properties": map[string]any{
+				"id":   map[string]string{"type": "string", "description": "Runtime memory entry id returned by memory_search"},
 				"date": map[string]string{"type": "string", "description": "Target day: YYYY-MM-DD, today, yesterday, or latest"},
 			},
-			"required": []string{"date"},
 		},
 		func(ctx context.Context, input map[string]any) (string, error) {
 			return auditCall(opts, "memory_get", input, func(ctx context.Context, input map[string]any) (string, error) {
-				return MemoryGetToolWithCwd(ctx, input, workingDir)
+				return MemoryGetToolWithDailyDir(ctx, input, workingDir, opts.MemoryBackend, opts.DailyMemoryDir)
 			})(ctx, input)
 		},
 	)

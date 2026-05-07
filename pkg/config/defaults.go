@@ -22,22 +22,27 @@ func DefaultConfig() *Config {
 			},
 		},
 		Agent: AgentConfig{
-			Name:                            "AnyClaw",
-			Description:                     "Your AI assistant with Codex-style runtime memory",
-			WorkDir:                         ".anyclaw",
-			WorkingDir:                      "workflows",
-			PermissionLevel:                 "limited",
-			RequireConfirmationForDangerous: true,
+			Name:            "AnyClaw",
+			Description:     "Your AI assistant with Codex-style runtime memory",
+			WorkDir:         ".anyclaw",
+			WorkingDir:      "workflows",
+			PermissionLevel: "limited",
+		},
+		Permissions: PermissionsConfig{
+			SandboxMode:    "workspace-write",
+			ApprovalPolicy: "on-request",
+			NetworkAccess:  "enabled",
+			DesktopAccess:  "ask-once-per-session",
 		},
 		Skills: SkillsConfig{
 			Dir:      "skills",
 			AutoLoad: true,
 		},
 		Memory: MemoryConfig{
-			Dir:        "memory",
+			Dir:        "",
 			MaxHistory: 100,
 			Format:     "markdown",
-			AutoSave:   true,
+			AutoSave:   false,
 		},
 		Gateway: GatewayConfig{
 			Host: "127.0.0.1",
@@ -109,7 +114,7 @@ func DefaultConfig() *Config {
 			ProtectEvents:            true,
 			RateLimitRPM:             120,
 			AuditLog:                 ".anyclaw/audit/audit.jsonl",
-			DangerousCommandPatterns: []string{"rm -rf", "del /f", "format ", "mkfs", "shutdown", "reboot", "poweroff", "chmod 777", "takeown", "icacls", "git reset --hard"},
+			DangerousCommandPatterns: defaultDangerousCommandPatterns(),
 			ProtectedPaths:           defaultProtectedPaths(),
 			CommandTimeoutSeconds:    30,
 			DesktopApprovalScope:     "capability",
@@ -122,6 +127,28 @@ func DefaultConfig() *Config {
 			EnableDecomposition: true,
 			SubAgents:           nil,
 		},
+	}
+}
+
+func defaultDangerousCommandPatterns() []string {
+	return []string{
+		`rm\s+-rf\s+`,
+		`del\s+/[fqs]\s+`,
+		`format\s+`,
+		`dd\s+if=`,
+		`mkfs\.`,
+		`fdisk\s+-`,
+		`shutdown`,
+		`reboot`,
+		`reg\s+(delete|add)`,
+		`sc\s+(delete|create|config)`,
+		`powershell\s+-Command\s+.*-Object\s+.*Start-Process`,
+		`curl\|sh`,
+		`wget\s+\|`,
+		`chmod\s+777`,
+		`chown\s+.*\s+root`,
+		`sudo\s+rm`,
+		`:\(){:|:&};:`,
 	}
 }
 

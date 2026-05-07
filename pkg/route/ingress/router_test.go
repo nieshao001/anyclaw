@@ -27,6 +27,22 @@ func TestRouterDecideIncludesThreadInConversationKey(t *testing.T) {
 	}
 }
 
+func TestRouterDecideLeavesPerChatKeyEmptyWithoutConversationSource(t *testing.T) {
+	router := NewRouter(config.RoutingConfig{Mode: "per-chat"})
+
+	decision := router.Decide(RouteRequest{
+		Channel: "api",
+		Text:    "start a fresh chat",
+	})
+
+	if decision.RouteKey != "" {
+		t.Fatalf("expected no route key without conversation source, got %q", decision.RouteKey)
+	}
+	if decision.SessionMode != "per-chat" {
+		t.Fatalf("expected per-chat mode, got %q", decision.SessionMode)
+	}
+}
+
 func TestRouterDecideAppliesSessionFieldsFromRule(t *testing.T) {
 	replyBack := true
 	router := NewRouter(config.RoutingConfig{
