@@ -93,6 +93,10 @@ func (s *Server) handleMarketArtifactDetail(w http.ResponseWriter, r *http.Reque
 					writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "cloud registry unavailable"})
 					return
 				}
+				if status, ok := marketregistry.HTTPStatusCode(err); ok && status == http.StatusNotFound {
+					writeJSON(w, http.StatusNotFound, map[string]string{"error": "artifact not found"})
+					return
+				}
 				writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
 				return
 			}
@@ -104,6 +108,10 @@ func (s *Server) handleMarketArtifactDetail(w http.ResponseWriter, r *http.Reque
 		if err != nil {
 			if errors.Is(err, marketregistry.ErrNotConfigured) || errors.Is(err, marketregistry.ErrRemoteDisabled) {
 				writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "cloud registry unavailable"})
+				return
+			}
+			if status, ok := marketregistry.HTTPStatusCode(err); ok && status == http.StatusNotFound {
+				writeJSON(w, http.StatusNotFound, map[string]string{"error": "artifact not found"})
 				return
 			}
 			writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
@@ -184,6 +192,7 @@ func (s *Server) listCloudMarketArtifacts(r *http.Request, filter marketplace.Fi
 		return emptyMarketList(filter), err.Error()
 	}
 	s.overlayCloudMarketStatus(r, &result, filter)
+	applyMarketStatusFilter(&result, filter.Status)
 	return result, ""
 }
 
@@ -192,29 +201,20 @@ func (s *Server) overlayCloudMarketStatus(r *http.Request, result *marketplace.L
 		return
 	}
 	result.Items = s.marketplaceStore().OverlayStatus(result.Items)
-	localResult, err := s.localMarketCatalog().List(r.Context(), marketplace.Filter{
-		Kind:   filter.Kind,
-		Source: marketplace.SourceLocal,
-		Limit:  1000,
-	})
-	if err != nil || len(localResult.Items) == 0 {
+}
+
+func applyMarketStatusFilter(result *marketplace.ListResult, status marketplace.ArtifactStatus) {
+	if result == nil || status == "" {
 		return
 	}
-	byID := make(map[string]marketplace.Artifact, len(localResult.Items))
-	for _, item := range localResult.Items {
-		byID[strings.ToLower(strings.TrimSpace(item.ID))] = item
-	}
-	for i := range result.Items {
-		local, ok := byID[strings.ToLower(strings.TrimSpace(result.Items[i].ID))]
-		if !ok {
-			continue
+	items := result.Items[:0]
+	for _, item := range result.Items {
+		if item.Status == status {
+			items = append(items, item)
 		}
-		result.Items[i].Status = local.Status
-		result.Items[i].Installed = local.Installed
-		result.Items[i].Bound = local.Bound
-		result.Items[i].Active = local.Active
-		result.Items[i].Enabled = local.Enabled
 	}
+	result.Items = items
+	result.Total = len(items)
 }
 
 func (s *Server) cloudMarketArtifact(r *http.Request, id string) (*marketplace.Artifact, error) {

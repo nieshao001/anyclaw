@@ -365,6 +365,14 @@ func retryable(err error) bool {
 	return true
 }
 
+func HTTPStatusCode(err error) (int, bool) {
+	var status remoteStatusError
+	if errors.As(err, &status) {
+		return status.StatusCode, true
+	}
+	return 0, false
+}
+
 type remoteStatusError struct {
 	StatusCode int
 	Body       string

@@ -4,7 +4,9 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/1024XEngineer/anyclaw/pkg/config"
 	"github.com/1024XEngineer/anyclaw/pkg/marketplace"
@@ -122,6 +124,77 @@ func TestMarketArtifactsCloudUnavailableDegradesToEmptyList(t *testing.T) {
 	}
 }
 
+func TestMarketArtifactsCloudStatusFilterAppliesAfterOverlay(t *testing.T) {
+	registry := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.URL.Query().Get("status"); got != "" {
+			t.Fatalf("status filter should not be sent to remote registry before overlay, got %q", got)
+		}
+		writeRegistryJSON(t, w, map[string]any{
+			"data": map[string]any{
+				"items": []map[string]any{
+					{
+						"id":             "cloud.skill.installed",
+						"kind":           "skill",
+						"name":           "Installed",
+						"summary":        "Installed cloud skill.",
+						"latest_version": "1.0.0",
+						"source":         "anyclaw-cloud",
+					},
+					{
+						"id":             "cloud.skill.available",
+						"kind":           "skill",
+						"name":           "Available",
+						"summary":        "Available cloud skill.",
+						"latest_version": "1.0.0",
+						"source":         "anyclaw-cloud",
+					},
+				},
+				"total":  2,
+				"limit":  50,
+				"offset": 0,
+			},
+		})
+	}))
+	defer registry.Close()
+
+	server := newCloudMarketTestServer(t, registry.URL)
+	store := server.marketplaceStore()
+	if err := store.SaveReceipt(&marketplace.InstallReceipt{
+		ID:            "cloud.skill.installed@1.0.0",
+		ArtifactID:    "cloud.skill.installed",
+		Kind:          marketplace.ArtifactKindSkill,
+		Name:          "Installed",
+		Version:       "1.0.0",
+		Source:        marketplace.SourceCloud,
+		InstalledPath: filepath.Join(t.TempDir(), "installed"),
+		InstalledBy:   "user",
+		InstalledAt:   time.Now().UTC().Format(time.RFC3339),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	rec := httptest.NewRecorder()
+	server.handleMarketArtifacts(rec, httptest.NewRequest(http.MethodGet, "/market/artifacts?source=cloud&status=installed", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var payload struct {
+		Data struct {
+			Items []struct {
+				ID     string `json:"id"`
+				Status string `json:"status"`
+			} `json:"items"`
+			Total int `json:"total"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload.Data.Total != 1 || len(payload.Data.Items) != 1 || payload.Data.Items[0].ID != "cloud.skill.installed" || payload.Data.Items[0].Status != "installed" {
+		t.Fatalf("unexpected filtered payload: %#v", payload.Data)
+	}
+}
+
 func TestMarketArtifactCloudDetailAndVersions(t *testing.T) {
 	registry := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
@@ -164,6 +237,24 @@ func TestMarketArtifactCloudDetailAndVersions(t *testing.T) {
 	rec = httptest.NewRecorder()
 	server.handleMarketArtifactDetail(rec, httptest.NewRequest(http.MethodGet, "/market/artifacts/anyclaw.agent.marketplace-operator/versions?source=cloud", nil))
 	if rec.Code != http.StatusOK {
+		t.Fatalf("versions status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestMarketArtifactCloudDetailMapsRemoteNotFound(t *testing.T) {
+	registry := httptest.NewServer(http.NotFoundHandler())
+	defer registry.Close()
+
+	server := newCloudMarketTestServer(t, registry.URL)
+	rec := httptest.NewRecorder()
+	server.handleMarketArtifactDetail(rec, httptest.NewRequest(http.MethodGet, "/market/artifacts/cloud.skill.missing", nil))
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("detail status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+
+	rec = httptest.NewRecorder()
+	server.handleMarketArtifactDetail(rec, httptest.NewRequest(http.MethodGet, "/market/artifacts/cloud.skill.missing/versions", nil))
+	if rec.Code != http.StatusNotFound {
 		t.Fatalf("versions status = %d, body = %s", rec.Code, rec.Body.String())
 	}
 }
