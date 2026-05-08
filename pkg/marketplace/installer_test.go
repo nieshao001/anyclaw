@@ -115,6 +115,43 @@ func TestInstallUseCaseChecksumMismatchRollsBack(t *testing.T) {
 	}
 }
 
+func TestInstallUseCaseRejectsManifestVersionMismatch(t *testing.T) {
+	archive := testArtifactArchive(t, "cloud.skill.release-notes", ArtifactKindSkill, "2.0.0")
+	registry := &fakeInstallRegistry{
+		resolved: ResolvedPackage{
+			ArtifactID:     "cloud.skill.release-notes",
+			Version:        "1.0.0",
+			DownloadURL:    "memory://release-notes",
+			ChecksumSHA256: sha256Hex(archive),
+			Kind:           ArtifactKindSkill,
+			Name:           "Release Notes",
+			RiskLevel:      "low",
+			TrustLevel:     "verified",
+		},
+		archive: archive,
+	}
+	store := NewStore(t.TempDir())
+	uc := NewInstallUseCase(store, registry)
+	job, _, err := uc.Start(context.Background(), InstallRequest{ArtifactID: "cloud.skill.release-notes", UserConfirmed: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = uc.Execute(context.Background(), job.ID)
+	if err == nil || !strings.Contains(err.Error(), "manifest version mismatch") {
+		t.Fatalf("expected manifest version mismatch, got %v", err)
+	}
+	done, err := store.GetJob(job.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if done.State != JobRolledBack {
+		t.Fatalf("job state = %s, want rolled_back", done.State)
+	}
+	if _, err := os.Stat(filepath.Join(store.InstalledDir(), "skill", "cloud-skill-release-notes", "1-0-0")); !os.IsNotExist(err) {
+		t.Fatalf("expected no installed dir after mismatch, stat err=%v", err)
+	}
+}
+
 func TestInstallUseCaseMissingChecksumBlocksBeforeDownload(t *testing.T) {
 	registry := &fakeInstallRegistry{
 		resolved: ResolvedPackage{

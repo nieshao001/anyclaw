@@ -27,6 +27,7 @@ type Client struct {
 	token           string
 	protocolVersion string
 	httpClient      *http.Client
+	downloadClient  *http.Client
 	retryCount      int
 	cacheTTL        time.Duration
 
@@ -39,6 +40,7 @@ type ClientConfig struct {
 	Token           string
 	ProtocolVersion string
 	Timeout         time.Duration
+	DownloadTimeout time.Duration
 	RetryCount      int
 	CacheTTL        time.Duration
 }
@@ -53,6 +55,10 @@ func NewClient(cfg ClientConfig) *Client {
 	if timeout <= 0 {
 		timeout = 30 * time.Second
 	}
+	downloadTimeout := cfg.DownloadTimeout
+	if downloadTimeout <= 0 {
+		downloadTimeout = timeout
+	}
 	protocolVersion := strings.TrimSpace(cfg.ProtocolVersion)
 	if protocolVersion == "" {
 		protocolVersion = "1.0"
@@ -65,6 +71,7 @@ func NewClient(cfg ClientConfig) *Client {
 		token:           strings.TrimSpace(cfg.Token),
 		protocolVersion: protocolVersion,
 		httpClient:      &http.Client{Timeout: timeout},
+		downloadClient:  &http.Client{Timeout: downloadTimeout},
 		retryCount:      cfg.RetryCount,
 		cacheTTL:        cfg.CacheTTL,
 		cache:           map[string]cacheEntry{},
@@ -85,6 +92,7 @@ func NewClientFromConfig(cfg config.MarketplaceConfig) *Client {
 		Token:           cfg.RegistryToken,
 		ProtocolVersion: cfg.ProtocolVersion,
 		Timeout:         time.Duration(cfg.RequestTimeoutSeconds) * time.Second,
+		DownloadTimeout: time.Duration(cfg.DownloadTimeoutSeconds) * time.Second,
 		RetryCount:      cfg.RetryCount,
 		CacheTTL:        time.Duration(cfg.CacheTTLSeconds) * time.Second,
 	})
@@ -285,15 +293,30 @@ func (c *Client) doOnce(ctx context.Context, method, path string, payload []byte
 	return data, nil
 }
 
+func (c *Client) shouldAuthorizeDownload(rawURL string) bool {
+	if c == nil {
+		return false
+	}
+	endpointURL, err := url.Parse(c.endpoint)
+	if err != nil {
+		return false
+	}
+	downloadURL, err := url.Parse(strings.TrimSpace(rawURL))
+	if err != nil {
+		return false
+	}
+	return strings.EqualFold(downloadURL.Scheme, endpointURL.Scheme) && strings.EqualFold(downloadURL.Host, endpointURL.Host)
+}
+
 func (c *Client) downloadOnce(ctx context.Context, rawURL string) ([]byte, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
 	if err != nil {
 		return nil, err
 	}
-	if c.token != "" {
+	if c.token != "" && c.shouldAuthorizeDownload(rawURL) {
 		req.Header.Set("Authorization", "Bearer "+c.token)
 	}
-	resp, err := c.httpClient.Do(req)
+	resp, err := c.downloadClient.Do(req)
 	if err != nil {
 		return nil, err
 	}

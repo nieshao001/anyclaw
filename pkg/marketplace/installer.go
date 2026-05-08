@@ -227,6 +227,9 @@ func (uc *InstallUseCase) installArchive(job *InstallJob, resolved ResolvedPacka
 	if manifest.Kind != resolved.Kind {
 		return artifactManifest{}, "", fmt.Errorf("manifest kind mismatch: expected %s, got %s", resolved.Kind, manifest.Kind)
 	}
+	if manifest.Version != resolved.Version {
+		return artifactManifest{}, "", fmt.Errorf("manifest version mismatch: expected %s, got %s", resolved.Version, manifest.Version)
+	}
 	finalDir := filepath.Join(uc.store.InstalledDir(), string(resolved.Kind), safeName(resolved.ArtifactID), safeName(resolved.Version))
 	backupDir := finalDir + ".rollback"
 	_ = os.RemoveAll(backupDir)

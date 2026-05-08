@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -176,6 +177,52 @@ func TestClientAcceptsEndpointWithV1Path(t *testing.T) {
 	}
 	if result.Total != 1 || len(result.Items) != 1 {
 		t.Fatalf("unexpected result: %#v", result)
+	}
+}
+
+func TestClientDownloadDoesNotSendTokenToDifferentOrigin(t *testing.T) {
+	registryServer := httptest.NewServer(http.NotFoundHandler())
+	defer registryServer.Close()
+
+	var downloadAuth string
+	downloadServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		downloadAuth = r.Header.Get("Authorization")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("archive"))
+	}))
+	defer downloadServer.Close()
+
+	client := NewClient(ClientConfig{Endpoint: registryServer.URL, Token: "secret-token"})
+	data, err := client.Download(context.Background(), downloadServer.URL+"/artifact.zip")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != "archive" {
+		t.Fatalf("download data = %q", string(data))
+	}
+	if downloadAuth != "" {
+		t.Fatalf("cross-origin download received Authorization header %q", downloadAuth)
+	}
+}
+
+func TestClientDownloadUsesDownloadTimeout(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(75 * time.Millisecond)
+		_, _ = w.Write([]byte("late"))
+	}))
+	defer server.Close()
+
+	client := NewClient(ClientConfig{
+		Endpoint:        server.URL,
+		Timeout:         time.Second,
+		DownloadTimeout: time.Nanosecond,
+	})
+	_, err := client.Download(context.Background(), server.URL+"/artifact.zip")
+	if err == nil {
+		t.Fatal("expected download timeout")
+	}
+	if !strings.Contains(err.Error(), "Client.Timeout") && !strings.Contains(err.Error(), "context deadline exceeded") {
+		t.Fatalf("expected timeout error, got %v", err)
 	}
 }
 

@@ -66,3 +66,37 @@ func TestLifecycleUninstallRemovesReceiptBindingsAndInstallDir(t *testing.T) {
 		t.Fatalf("audit missing uninstall event: %s", string(auditData))
 	}
 }
+
+func TestLifecycleUninstallRejectsInstalledPathOutsideInstallRoot(t *testing.T) {
+	root := t.TempDir()
+	store := NewStore(root)
+	outsidePath := filepath.Join(root, "outside")
+	if err := os.MkdirAll(outsidePath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	receipt := &InstallReceipt{
+		ID:            "cloud.skill.release-notes@1.0.0",
+		ArtifactID:    "cloud.skill.release-notes",
+		Kind:          ArtifactKindSkill,
+		Name:          "Release Notes",
+		Version:       "1.0.0",
+		Source:        SourceCloud,
+		InstalledPath: outsidePath,
+		InstalledBy:   "user",
+		InstalledAt:   time.Now().UTC().Format(time.RFC3339),
+	}
+	if err := store.SaveReceipt(receipt); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := NewLifecycleService(store).Uninstall(UninstallRequest{ArtifactID: receipt.ArtifactID})
+	if err == nil || !strings.Contains(err.Error(), "escapes marketplace install root") {
+		t.Fatalf("expected install root escape error, got %v", err)
+	}
+	if _, err := os.Stat(outsidePath); err != nil {
+		t.Fatalf("outside path should remain: %v", err)
+	}
+	if _, err := store.GetReceipt(receipt.ID); err != nil {
+		t.Fatalf("receipt should remain: %v", err)
+	}
+}

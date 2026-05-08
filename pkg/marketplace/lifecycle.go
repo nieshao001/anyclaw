@@ -3,6 +3,7 @@ package marketplace
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 )
@@ -42,7 +43,11 @@ func (s *LifecycleService) Uninstall(req UninstallRequest) (*UninstallResult, er
 		return nil, err
 	}
 	if strings.TrimSpace(receipt.InstalledPath) != "" {
-		if err := os.RemoveAll(receipt.InstalledPath); err != nil {
+		installedPath, err := safeInstalledPath(s.store.InstalledDir(), receipt.InstalledPath)
+		if err != nil {
+			return nil, err
+		}
+		if err := os.RemoveAll(installedPath); err != nil {
 			return nil, err
 		}
 	}
@@ -70,6 +75,25 @@ func (s *LifecycleService) Uninstall(req UninstallRequest) (*UninstallResult, er
 	})
 	s.event("market.uninstall.succeeded", "success", "Marketplace artifact uninstalled", result, nil)
 	return result, nil
+}
+
+func safeInstalledPath(installedRoot, installedPath string) (string, error) {
+	root, err := filepath.Abs(filepath.Clean(installedRoot))
+	if err != nil {
+		return "", err
+	}
+	target, err := filepath.Abs(filepath.Clean(strings.TrimSpace(installedPath)))
+	if err != nil {
+		return "", err
+	}
+	rel, err := filepath.Rel(root, target)
+	if err != nil {
+		return "", err
+	}
+	if rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) || filepath.IsAbs(rel) {
+		return "", fmt.Errorf("installed path escapes marketplace install root")
+	}
+	return target, nil
 }
 
 func (s *LifecycleService) audit(eventType, actor string, result *UninstallResult, detail map[string]any) {
