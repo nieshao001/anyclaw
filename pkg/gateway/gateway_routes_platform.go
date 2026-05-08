@@ -62,6 +62,8 @@ func (s *Server) registerMCPRoutes(mux *http.ServeMux) {
 }
 
 func (s *Server) registerMarketRoutes(mux *http.ServeMux) {
+	mux.HandleFunc("/market/artifacts", s.wrap("/market/artifacts", requirePermission("market.read", s.handleMarketArtifacts)))
+	mux.HandleFunc("/market/artifacts/", s.wrap("/market/artifacts/", requirePermission("market.read", s.handleMarketArtifactDetail)))
 	mux.HandleFunc("/market/search", s.wrap("/market/search", requirePermission("market.read", s.handleMarketSearch)))
 	mux.HandleFunc("/market/plugins", s.wrap("/market/plugins", requirePermission("market.read", s.handleMarketPlugins)))
 	mux.HandleFunc("/market/plugins/", s.wrap("/market/plugins/", requirePermissionByMethod(map[string]string{
