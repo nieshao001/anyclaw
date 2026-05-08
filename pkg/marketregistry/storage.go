@@ -43,8 +43,16 @@ func (s *LocalStorage) EnsurePackage(artifact Artifact, version ArtifactVersion)
 	if s == nil {
 		return PackageInfo{}, fmt.Errorf("storage is not configured")
 	}
-	storageKey := filepath.ToSlash(filepath.Join(artifact.ID, version.Version, "artifact.zip"))
-	path := filepath.Join(s.packagesDir, artifact.ID, version.Version, "artifact.zip")
+	artifactSegment, err := safeStorageSegment(artifact.ID)
+	if err != nil {
+		return PackageInfo{}, fmt.Errorf("artifact id: %w", err)
+	}
+	versionSegment, err := safeStorageSegment(version.Version)
+	if err != nil {
+		return PackageInfo{}, fmt.Errorf("version: %w", err)
+	}
+	storageKey := filepath.ToSlash(filepath.Join(artifactSegment, versionSegment, "artifact.zip"))
+	path := filepath.Join(s.packagesDir, artifactSegment, versionSegment, "artifact.zip")
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return PackageInfo{}, err
 	}
@@ -62,6 +70,17 @@ func (s *LocalStorage) EnsurePackage(artifact Artifact, version ArtifactVersion)
 	info.StorageKey = storageKey
 	info.Path = path
 	return info, nil
+}
+
+func safeStorageSegment(value string) (string, error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "", fmt.Errorf("value is required")
+	}
+	if value == "." || value == ".." || strings.ContainsAny(value, `/\`) {
+		return "", fmt.Errorf("value must be a single path segment")
+	}
+	return value, nil
 }
 
 func (s *LocalStorage) Open(storageKey string) (*os.File, error) {

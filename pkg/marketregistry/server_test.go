@@ -160,6 +160,9 @@ func TestServerAdminTokenPublishQuarantineAndStats(t *testing.T) {
 	if published.Data.ID != "cloud.skill.test-publish" {
 		t.Fatalf("unexpected published artifact: %#v", published.Data)
 	}
+	if published.Data.Publisher != "AnyClaw Labs" {
+		t.Fatalf("publisher = %q, want token publisher", published.Data.Publisher)
+	}
 
 	var resolved struct {
 		Data ResolvedArtifact `json:"data"`
@@ -207,19 +210,17 @@ func TestServerAdminTokenPublishQuarantineAndStats(t *testing.T) {
 	}
 }
 
-func TestServerRequireAdminToken(t *testing.T) {
+func TestServerRequiresAdminToken(t *testing.T) {
 	_, err := NewServer(context.Background(), ServerConfig{
-		DataDir:           t.TempDir(),
-		RequireAdminToken: true,
+		DataDir: t.TempDir(),
 	})
 	if err == nil || !strings.Contains(err.Error(), "admin token is required") {
 		t.Fatalf("expected missing admin token error, got %v", err)
 	}
 
 	server, err := NewServer(context.Background(), ServerConfig{
-		DataDir:           t.TempDir(),
-		AdminToken:        "admin-secret",
-		RequireAdminToken: true,
+		DataDir:    t.TempDir(),
+		AdminToken: "admin-secret",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -228,6 +229,29 @@ func TestServerRequireAdminToken(t *testing.T) {
 
 	var unauthorized ErrorResponse
 	doJSON(t, server, http.MethodGet, "/v1/admin/audit", nil, http.StatusUnauthorized, &unauthorized)
+}
+
+func TestServerPublishRejectsPublisherMismatch(t *testing.T) {
+	server, err := NewServer(context.Background(), ServerConfig{
+		DataDir:    t.TempDir(),
+		AdminToken: "admin-secret",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = server.Close() })
+
+	var token struct {
+		Data PublisherToken `json:"data"`
+	}
+	doJSONWithAuth(t, server, http.MethodPost, "/v1/admin/tokens", strings.NewReader(`{"publisher_id":"publisher-a"}`), "admin-secret", http.StatusOK, &token)
+
+	publishBody := `{"artifact":{"id":"cloud.skill.publisher-mismatch","kind":"skill","name":"Mismatch","summary":"Should fail","publisher":"publisher-b","latest_version":"1.0.0","risk_level":"low","trust_level":"verified"},"versions":[{"version":"1.0.0"}]}`
+	var forbidden ErrorResponse
+	doJSONWithAuth(t, server, http.MethodPost, "/v1/publish", strings.NewReader(publishBody), token.Data.Token, http.StatusForbidden, &forbidden)
+	if forbidden.Error.Code != "publisher_mismatch" {
+		t.Fatalf("unexpected error: %#v", forbidden)
+	}
 }
 
 func TestServerRevokePublisherToken(t *testing.T) {
@@ -302,8 +326,9 @@ func TestServerAdminDeleteArtifact(t *testing.T) {
 func newTestServer(t *testing.T) *Server {
 	t.Helper()
 	server, err := NewServer(context.Background(), ServerConfig{
-		DataDir: t.TempDir(),
-		Seed:    true,
+		DataDir:    t.TempDir(),
+		Seed:       true,
+		AdminToken: "test-admin-token",
 	})
 	if err != nil {
 		t.Fatal(err)

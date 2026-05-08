@@ -34,7 +34,7 @@ type Server struct {
 }
 
 func NewServer(ctx context.Context, cfg ServerConfig) (*Server, error) {
-	if cfg.RequireAdminToken && strings.TrimSpace(cfg.AdminToken) == "" {
+	if strings.TrimSpace(cfg.AdminToken) == "" {
 		return nil, fmt.Errorf("admin token is required")
 	}
 	store, err := OpenStoreWithConfig(ctx, StoreConfig{DataDir: cfg.DataDir, Driver: cfg.DBDriver, DSN: cfg.DBDSN})
@@ -282,6 +282,10 @@ func (s *Server) handlePublish(w http.ResponseWriter, r *http.Request) {
 	if strings.TrimSpace(req.Artifact.Publisher) == "" {
 		req.Artifact.Publisher = publisherID
 	}
+	if req.Artifact.Publisher != publisherID {
+		writeError(w, http.StatusForbidden, "publisher_mismatch", "publisher token cannot publish for another publisher", "")
+		return
+	}
 	if len(req.Versions) == 0 && strings.TrimSpace(req.Artifact.LatestVersion) != "" {
 		req.Versions = []ArtifactVersion{{ArtifactID: req.Artifact.ID, Version: req.Artifact.LatestVersion}}
 	}
@@ -471,7 +475,7 @@ func parseInt(value string, fallback int) int {
 
 func (s *Server) authorizeAdmin(r *http.Request) bool {
 	if s == nil || s.adminToken == "" {
-		return true
+		return false
 	}
 	return bearerToken(r) == s.adminToken
 }

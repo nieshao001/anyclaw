@@ -42,7 +42,6 @@ func serve(args []string) error {
 	dbDriver := fs.String("db-driver", "sqlite", "database/sql driver name")
 	dbDSN := fs.String("db-dsn", "", "database DSN; defaults to <data-dir>/registry.db for sqlite")
 	adminToken := fs.String("admin-token", os.Getenv("ANYCLAW_REGISTRY_ADMIN_TOKEN"), "admin bearer token; defaults to ANYCLAW_REGISTRY_ADMIN_TOKEN")
-	requireAdminToken := fs.Bool("require-admin-token", envBool("ANYCLAW_REGISTRY_REQUIRE_ADMIN_TOKEN", true), "fail startup when admin token is empty")
 	seed := fs.Bool("seed", true, "seed fixture artifacts when the registry is empty")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -52,13 +51,12 @@ func serve(args []string) error {
 	defer stop()
 
 	server, err := marketregistry.NewServer(ctx, marketregistry.ServerConfig{
-		Addr:              *addr,
-		DataDir:           *dataDir,
-		DBDriver:          *dbDriver,
-		DBDSN:             *dbDSN,
-		AdminToken:        *adminToken,
-		RequireAdminToken: *requireAdminToken,
-		Seed:              *seed,
+		Addr:       *addr,
+		DataDir:    *dataDir,
+		DBDriver:   *dbDriver,
+		DBDSN:      *dbDSN,
+		AdminToken: *adminToken,
+		Seed:       *seed,
 	})
 	if err != nil {
 		return err
@@ -74,20 +72,5 @@ func serve(args []string) error {
 }
 
 func printUsage() {
-	fmt.Println("Usage: anyclaw-registry serve [--addr :8791] [--data-dir .anyclaw-registry] [--db-driver sqlite] [--db-dsn path-or-url] [--admin-token token] [--require-admin-token=true] [--seed=true]")
-}
-
-func envBool(name string, fallback bool) bool {
-	value := os.Getenv(name)
-	if value == "" {
-		return fallback
-	}
-	switch value {
-	case "1", "true", "TRUE", "True", "yes", "YES", "on", "ON":
-		return true
-	case "0", "false", "FALSE", "False", "no", "NO", "off", "OFF":
-		return false
-	default:
-		return fallback
-	}
+	fmt.Println("Usage: anyclaw-registry serve [--addr :8791] [--data-dir .anyclaw-registry] [--db-driver sqlite] [--db-dsn path-or-url] [--admin-token token] [--seed=true]")
 }
