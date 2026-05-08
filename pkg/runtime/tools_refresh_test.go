@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -197,6 +198,106 @@ func TestRefreshToolRegistryUsesRuntimeWorkDirMarketplaceStore(t *testing.T) {
 	}
 }
 
+func TestRefreshAfterMarketBindingUsesTargetScope(t *testing.T) {
+	store, _ := newRuntimePoolTestStore(t)
+	pool := NewRuntimePool("anyclaw.json", store, 4, 0)
+	pool.Remember("agent-1", "org-1", "project-1", "workspace-1", &MainRuntime{})
+	pool.Remember("agent-2", "org-1", "project-2", "workspace-2", &MainRuntime{})
+	rt := &MainRuntime{
+		Config:    config.DefaultConfig(),
+		Tools:     tools.NewRegistry(),
+		HotReload: NewHotReloadCoordinator(pool, store),
+	}
+	if err := rt.RefreshAfterMarketBinding(context.Background(), &marketplace.Binding{
+		ID:         "binding-1",
+		TargetType: marketplace.TargetWorkspace,
+		TargetID:   "workspace-1",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := pool.runtimes[runtimeKey("agent-1", "org-1", "project-1", "workspace-1")]; ok {
+		t.Fatal("expected workspace-1 runtime to be refreshed")
+	}
+	if _, ok := pool.runtimes[runtimeKey("agent-2", "org-1", "project-2", "workspace-2")]; !ok {
+		t.Fatal("workspace-2 runtime should remain pooled")
+	}
+}
+
+func TestIntegrateMarketCLIUsesPackageEntryPoint(t *testing.T) {
+	tempDir := t.TempDir()
+	installed := filepath.Join(tempDir, "installed")
+	if err := os.MkdirAll(filepath.Join(installed, "cli", "bin"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(installed, "cli", "bin", "repo-health.cmd"), []byte("@echo off\r\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeJSONFileRuntimeMarket(t, filepath.Join(installed, "anyclaw.artifact.json"), map[string]any{
+		"id":      "cloud.cli.repo-health",
+		"kind":    "cli",
+		"name":    "Repo Health",
+		"version": "1.0.0",
+	})
+	writeJSONFileRuntimeMarket(t, filepath.Join(installed, "cli", "command.json"), map[string]any{
+		"name":        "repo-health",
+		"entry_point": "cli/bin/repo-health.cmd",
+	})
+	rt := &MainRuntime{Config: config.DefaultConfig(), WorkingDir: filepath.Join(tempDir, "workspace")}
+	if err := rt.IntegrateMarketReceiptAndRefresh(context.Background(), &marketplace.InstallReceipt{
+		ID:            "cloud.cli.repo-health@1.0.0",
+		ArtifactID:    "cloud.cli.repo-health",
+		Kind:          marketplace.ArtifactKindCLI,
+		Name:          "Repo Health",
+		Version:       "1.0.0",
+		InstalledPath: installed,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(filepath.Join(rt.WorkingDir, "CLI-Anything", "registry.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var registry struct {
+		CLIs []map[string]any `json:"clis"`
+	}
+	if err := json.Unmarshal(data, &registry); err != nil {
+		t.Fatal(err)
+	}
+	wantEntry := filepath.Join(installed, "cli", "bin", "repo-health.cmd")
+	if len(registry.CLIs) != 1 || registry.CLIs[0]["entry_point"] != wantEntry {
+		t.Fatalf("entry point = %#v, want %s", registry.CLIs, wantEntry)
+	}
+}
+
+func TestIntegrateMarketCLIRejectsMissingEntryPoint(t *testing.T) {
+	tempDir := t.TempDir()
+	installed := filepath.Join(tempDir, "installed")
+	if err := os.MkdirAll(filepath.Join(installed, "cli"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeJSONFileRuntimeMarket(t, filepath.Join(installed, "anyclaw.artifact.json"), map[string]any{
+		"id":      "cloud.cli.repo-health",
+		"kind":    "cli",
+		"name":    "Repo Health",
+		"version": "1.0.0",
+	})
+	writeJSONFileRuntimeMarket(t, filepath.Join(installed, "cli", "command.json"), map[string]any{
+		"name":        "repo-health",
+		"entry_point": "cli/bin/missing.cmd",
+	})
+	err := (&MainRuntime{Config: config.DefaultConfig(), WorkingDir: filepath.Join(tempDir, "workspace")}).IntegrateMarketReceiptAndRefresh(context.Background(), &marketplace.InstallReceipt{
+		ID:            "cloud.cli.repo-health@1.0.0",
+		ArtifactID:    "cloud.cli.repo-health",
+		Kind:          marketplace.ArtifactKindCLI,
+		Name:          "Repo Health",
+		Version:       "1.0.0",
+		InstalledPath: installed,
+	})
+	if err == nil || !strings.Contains(err.Error(), "entry point missing") {
+		t.Fatalf("expected missing entry point error, got %v", err)
+	}
+}
+
 type refreshToolLLM struct {
 	toolName string
 	calls    int
@@ -312,6 +413,20 @@ func writeRuntimeMarketJSON(t *testing.T, w http.ResponseWriter, value any) {
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(value); err != nil {
 		t.Fatalf("encode json: %v", err)
+	}
+}
+
+func writeJSONFileRuntimeMarket(t *testing.T, path string, value any) {
+	t.Helper()
+	data, err := json.Marshal(value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		t.Fatal(err)
 	}
 }
 

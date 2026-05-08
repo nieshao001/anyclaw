@@ -81,6 +81,7 @@ type MainRuntime struct {
 	SecretsStore   *secrets.Store
 	WorkDir        string
 	WorkingDir     string
+	HotReload      *HotReloadCoordinator
 }
 
 // App is kept as a legacy alias while callers migrate to MainRuntime naming.

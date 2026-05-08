@@ -58,7 +58,24 @@ func (a *MainRuntime) RefreshAfterMarketBinding(ctx context.Context, binding *ma
 	if a == nil {
 		return fmt.Errorf("runtime is unavailable")
 	}
-	return a.RefreshToolRegistry()
+	if err := a.RefreshToolRegistry(); err != nil {
+		return err
+	}
+	if binding == nil {
+		return nil
+	}
+	scope := refreshScopeForMarketBinding(binding)
+	if scope.Kind == "" {
+		return nil
+	}
+	if a.HotReload == nil {
+		return nil
+	}
+	result := a.HotReload.Refresh(ctx, scope)
+	if result.Status == "failed" {
+		return fmt.Errorf("refresh after marketplace binding: %s", result.Error)
+	}
+	return nil
 }
 
 func (a *MainRuntime) integrateRuntimeMarketSkill(receipt *marketplace.InstallReceipt, manifest runtimeMarketArtifactManifest) error {
@@ -115,25 +132,73 @@ func (a *MainRuntime) integrateRuntimeMarketCLI(receipt *marketplace.InstallRece
 	if err := os.MkdirAll(root, 0o755); err != nil {
 		return err
 	}
-	entryName := safeRuntimeMarketName(firstNonEmptyRuntimeMarket(manifest.ManifestSummary["command"], manifest.Name, receipt.Name, receipt.ArtifactID))
-	commandDir := filepath.Join(root, "bin")
-	if err := os.MkdirAll(commandDir, 0o755); err != nil {
+	spec, err := runtimeMarketCLISpec(receipt.InstalledPath, receipt, manifest)
+	if err != nil {
 		return err
 	}
-	commandPath := filepath.Join(commandDir, entryName+".cmd")
+	entryName := safeRuntimeMarketName(firstNonEmptyRuntimeMarket(spec.Name, manifest.ManifestSummary["command"], manifest.Name, receipt.Name, receipt.ArtifactID))
+	entryPoint := filepath.Join(receipt.InstalledPath, filepath.FromSlash(spec.EntryPoint))
+	if !pathWithinRuntimeMarketBase(receipt.InstalledPath, entryPoint) {
+		return fmt.Errorf("marketplace CLI entry point escapes installed path: %s", spec.EntryPoint)
+	}
+	info, err := os.Stat(entryPoint)
+	if err != nil {
+		return fmt.Errorf("marketplace CLI entry point missing: %w", err)
+	}
+	if info.IsDir() {
+		return fmt.Errorf("marketplace CLI entry point is a directory: %s", spec.EntryPoint)
+	}
 	entry := map[string]any{
 		"name":         entryName,
 		"display_name": firstNonEmptyRuntimeMarket(manifest.Name, receipt.Name, entryName),
 		"version":      firstNonEmptyRuntimeMarket(receipt.Version, manifest.Version),
 		"description":  firstNonEmptyRuntimeMarket(manifest.Summary, manifest.Description, receipt.Description),
-		"entry_point":  commandPath,
+		"entry_point":  entryPoint,
 		"category":     "marketplace",
 		"contributor":  firstNonEmptyRuntimeMarket(manifest.Publisher, "AnyClaw Cloud"),
 	}
 	if err := upsertRuntimeMarketCLIRegistryEntry(filepath.Join(root, "registry.json"), entryName, entry); err != nil {
 		return err
 	}
-	return os.WriteFile(commandPath, []byte("@echo off\r\nrem AnyClaw marketplace CLI placeholder\r\n"), 0o755)
+	return nil
+}
+
+type runtimeMarketCLISpecData struct {
+	Name       string `json:"name"`
+	EntryPoint string `json:"entry_point"`
+	Command    string `json:"command"`
+}
+
+func runtimeMarketCLISpec(installedPath string, receipt *marketplace.InstallReceipt, manifest runtimeMarketArtifactManifest) (runtimeMarketCLISpecData, error) {
+	var spec runtimeMarketCLISpecData
+	if data, err := os.ReadFile(filepath.Join(installedPath, "cli", "command.json")); err == nil {
+		_ = json.Unmarshal(data, &spec)
+	}
+	spec.Name = firstNonEmptyRuntimeMarket(spec.Name, manifest.ManifestSummary["command"], manifest.Name, receipt.Name, receipt.ArtifactID)
+	spec.EntryPoint = firstNonEmptyRuntimeMarket(spec.EntryPoint, spec.Command, manifest.ManifestSummary["entry_point"], manifest.ManifestSummary["command"])
+	if strings.TrimSpace(spec.EntryPoint) == "" {
+		return spec, fmt.Errorf("marketplace CLI artifact requires cli/command.json entry_point")
+	}
+	return spec, nil
+}
+
+func refreshScopeForMarketBinding(binding *marketplace.Binding) RefreshScope {
+	targetID := strings.TrimSpace(binding.TargetID)
+	scope := RefreshScope{Reason: "marketplace binding " + binding.ID}
+	switch binding.TargetType {
+	case marketplace.TargetMainAgent:
+		scope.Kind = RefreshScopeAgent
+		scope.Agent = firstNonEmptyRuntimeMarket(targetID, binding.TargetName)
+	case marketplace.TargetPersistentSubagent:
+		scope.Kind = RefreshScopeAgent
+		scope.Agent = targetID
+	case marketplace.TargetWorkspace:
+		scope.Kind = RefreshScopeWorkspace
+		scope.Workspace = targetID
+	case marketplace.TargetRuntimeGlobal:
+		scope.Kind = RefreshScopeGlobal
+	}
+	return scope
 }
 
 func (a *MainRuntime) attachRuntimeMarketSkill(name, version string, permissions []string) error {
