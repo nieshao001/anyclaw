@@ -298,6 +298,149 @@ func TestIntegrateMarketCLIRejectsMissingEntryPoint(t *testing.T) {
 	}
 }
 
+func TestCleanupMarketReceiptRemovesIntegratedSkill(t *testing.T) {
+	tempDir := t.TempDir()
+	installed := filepath.Join(tempDir, "installed")
+	if err := os.MkdirAll(filepath.Join(installed, "skill"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeJSONFileRuntimeMarket(t, filepath.Join(installed, "anyclaw.artifact.json"), map[string]any{
+		"id":      "cloud.skill.release-notes",
+		"kind":    "skill",
+		"name":    "Release Notes",
+		"version": "1.0.0",
+	})
+	if err := os.WriteFile(filepath.Join(installed, "skill", "SKILL.md"), []byte("# Release Notes\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.DefaultConfig()
+	cfg.Agent.Name = "Main Agent"
+	cfg.Agent.ActiveProfile = "Main Agent"
+	cfg.Agent.Profiles = []config.AgentProfile{{Name: "Main Agent"}}
+	cfg.Skills.Dir = filepath.Join(tempDir, "skills")
+	rt := &MainRuntime{
+		ConfigPath: filepath.Join(tempDir, "anyclaw.json"),
+		Config:     cfg,
+		WorkingDir: tempDir,
+	}
+	receipt := &marketplace.InstallReceipt{
+		ID:            "cloud.skill.release-notes@1.0.0",
+		ArtifactID:    "cloud.skill.release-notes",
+		Kind:          marketplace.ArtifactKindSkill,
+		Name:          "Release Notes",
+		Version:       "1.0.0",
+		InstalledPath: installed,
+	}
+	if err := rt.IntegrateMarketReceiptAndRefresh(context.Background(), receipt); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(cfg.Skills.Dir, "cloud-skill-release-notes")); err != nil {
+		t.Fatalf("expected integrated skill dir: %v", err)
+	}
+	profile, ok := cfg.ResolveMainAgentProfile()
+	if !ok || len(profile.Skills) != 1 || profile.Skills[0].Name != "Release Notes" {
+		t.Fatalf("profile skills after integrate = %#v", profile.Skills)
+	}
+	if err := rt.CleanupMarketReceiptAndRefresh(context.Background(), receipt); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(cfg.Skills.Dir, "cloud-skill-release-notes")); !os.IsNotExist(err) {
+		t.Fatalf("integrated skill dir err = %v, want not exist", err)
+	}
+	profile, ok = cfg.ResolveMainAgentProfile()
+	if !ok {
+		t.Fatal("expected main profile to remain")
+	}
+	if len(profile.Skills) != 0 {
+		t.Fatalf("profile skills after cleanup = %#v, want empty", profile.Skills)
+	}
+}
+
+func TestCleanupMarketReceiptRemovesAgentProfileAndCLIEntry(t *testing.T) {
+	tempDir := t.TempDir()
+	agentInstalled := filepath.Join(tempDir, "agent-installed")
+	writeJSONFileRuntimeMarket(t, filepath.Join(agentInstalled, "anyclaw.artifact.json"), map[string]any{
+		"id":          "cloud.agent.code-reviewer",
+		"kind":        "agent",
+		"name":        "Code Reviewer",
+		"version":     "1.0.0",
+		"description": "Reviews code.",
+	})
+	cfg := config.DefaultConfig()
+	cfg.Agent.Profiles = []config.AgentProfile{{Name: "Main Agent"}, {Name: "Code Reviewer", Role: "marketplace"}}
+	rt := &MainRuntime{
+		ConfigPath: filepath.Join(tempDir, "anyclaw.json"),
+		Config:     cfg,
+		WorkingDir: filepath.Join(tempDir, "workspace"),
+	}
+	if err := rt.CleanupMarketReceiptAndRefresh(context.Background(), &marketplace.InstallReceipt{
+		ID:            "cloud.agent.code-reviewer@1.0.0",
+		ArtifactID:    "cloud.agent.code-reviewer",
+		Kind:          marketplace.ArtifactKindAgent,
+		Name:          "Code Reviewer",
+		Version:       "1.0.0",
+		InstalledPath: agentInstalled,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := cfg.FindAgentProfile("Code Reviewer"); ok {
+		t.Fatal("expected marketplace agent profile to be removed")
+	}
+
+	cliInstalled := filepath.Join(tempDir, "cli-installed")
+	if err := os.MkdirAll(filepath.Join(cliInstalled, "cli", "bin"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cliInstalled, "cli", "bin", "repo-health.cmd"), []byte("@echo off\r\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeJSONFileRuntimeMarket(t, filepath.Join(cliInstalled, "anyclaw.artifact.json"), map[string]any{
+		"id":      "cloud.cli.repo-health",
+		"kind":    "cli",
+		"name":    "Repo Health",
+		"version": "1.0.0",
+	})
+	writeJSONFileRuntimeMarket(t, filepath.Join(cliInstalled, "cli", "command.json"), map[string]any{
+		"name":        "repo-health",
+		"entry_point": "cli/bin/repo-health.cmd",
+	})
+	if err := rt.IntegrateMarketReceiptAndRefresh(context.Background(), &marketplace.InstallReceipt{
+		ID:            "cloud.cli.repo-health@1.0.0",
+		ArtifactID:    "cloud.cli.repo-health",
+		Kind:          marketplace.ArtifactKindCLI,
+		Name:          "Repo Health",
+		Version:       "1.0.0",
+		InstalledPath: cliInstalled,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	registryPath := filepath.Join(rt.WorkingDir, "CLI-Anything", "registry.json")
+	data, err := os.ReadFile(registryPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), "repo-health") {
+		t.Fatalf("expected CLI registry entry, got %s", data)
+	}
+	if err := rt.CleanupMarketReceiptAndRefresh(context.Background(), &marketplace.InstallReceipt{
+		ID:            "cloud.cli.repo-health@1.0.0",
+		ArtifactID:    "cloud.cli.repo-health",
+		Kind:          marketplace.ArtifactKindCLI,
+		Name:          "Repo Health",
+		Version:       "1.0.0",
+		InstalledPath: cliInstalled,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	data, err = os.ReadFile(registryPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(data), "repo-health") {
+		t.Fatalf("expected CLI registry entry to be removed, got %s", data)
+	}
+}
+
 type refreshToolLLM struct {
 	toolName string
 	calls    int

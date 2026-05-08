@@ -14,12 +14,13 @@ import (
 
 	"github.com/1024XEngineer/anyclaw/pkg/capability/tools"
 	"github.com/1024XEngineer/anyclaw/pkg/marketplace"
+	marketbridge "github.com/1024XEngineer/anyclaw/pkg/marketplace/bridge"
 	marketregistry "github.com/1024XEngineer/anyclaw/pkg/marketplace/registry"
 )
 
 func TestRegisterMarketplaceToolsMainAgentOnly(t *testing.T) {
 	registry := tools.NewRegistry()
-	Register(registry, Options{Store: marketplace.NewStore(t.TempDir())})
+	Register(registry, Options{Bridge: testBridge(t, marketplace.NewStore(t.TempDir()), nil)})
 	if _, ok := registry.Get("market_search_artifacts"); !ok {
 		t.Fatal("expected market_search_artifacts tool")
 	}
@@ -40,8 +41,7 @@ func TestSearchToolRoutesMissingCapabilityToCloud(t *testing.T) {
 
 	registry := tools.NewRegistry()
 	Register(registry, Options{
-		Store:    marketplace.NewStore(t.TempDir()),
-		Registry: marketregistry.NewClient(marketregistry.ClientConfig{Endpoint: server.URL}),
+		Bridge: testBridge(t, marketplace.NewStore(t.TempDir()), marketregistry.NewClient(marketregistry.ClientConfig{Endpoint: server.URL})),
 	})
 	out, err := registry.Call(tools.WithToolCaller(context.Background(), tools.ToolCaller{Role: tools.ToolCallerRoleMainAgent}), "market_search_artifacts", map[string]any{
 		"query": "please write release notes",
@@ -62,7 +62,7 @@ func TestInstallToolAskReturnsConfirmationWithoutInstalling(t *testing.T) {
 
 	store := marketplace.NewStore(t.TempDir())
 	registry := tools.NewRegistry()
-	Register(registry, Options{Store: store, Registry: marketregistry.NewClient(marketregistry.ClientConfig{Endpoint: server.URL})})
+	Register(registry, Options{Bridge: testBridge(t, store, marketregistry.NewClient(marketregistry.ClientConfig{Endpoint: server.URL}))})
 	out, err := registry.Call(tools.WithToolCaller(context.Background(), tools.ToolCaller{Role: tools.ToolCallerRoleMainAgent}), "market_install_artifact", map[string]any{
 		"artifact_id": "cloud.agent.code-reviewer",
 	})
@@ -84,7 +84,7 @@ func TestInstallToolConfirmedInstallsAsAgent(t *testing.T) {
 
 	store := marketplace.NewStore(t.TempDir())
 	registry := tools.NewRegistry()
-	Register(registry, Options{Store: store, Registry: marketregistry.NewClient(marketregistry.ClientConfig{Endpoint: server.URL}), AutoInstallSkill: true})
+	Register(registry, Options{Bridge: testBridgeWithAutoInstall(t, store, marketregistry.NewClient(marketregistry.ClientConfig{Endpoint: server.URL}))})
 	out, err := registry.Call(tools.WithToolCaller(context.Background(), tools.ToolCaller{Role: tools.ToolCallerRoleMainAgent}), "market_install_artifact", map[string]any{
 		"artifact_id": "cloud.skill.release-notes",
 	})
@@ -119,7 +119,7 @@ func TestBindToolCreatesAgentBinding(t *testing.T) {
 		t.Fatal(err)
 	}
 	registry := tools.NewRegistry()
-	Register(registry, Options{Store: store})
+	Register(registry, Options{Bridge: testBridge(t, store, nil)})
 	out, err := registry.Call(tools.WithToolCaller(context.Background(), tools.ToolCaller{Role: tools.ToolCallerRoleMainAgent}), "market_bind_artifact", map[string]any{
 		"artifact_id": "cloud.skill.release-notes",
 		"target_type": "runtime_global",
@@ -136,10 +136,10 @@ func TestMarketToolsValidationAndHelpers(t *testing.T) {
 	if _, err := installArtifact(context.Background(), Options{}, map[string]any{"artifact_id": "x"}); err == nil {
 		t.Fatal("expected install not configured error")
 	}
-	if _, err := installArtifact(context.Background(), Options{Store: marketplace.NewStore(t.TempDir()), Registry: marketregistry.NewClient(marketregistry.ClientConfig{Endpoint: "http://127.0.0.1:1"})}, map[string]any{}); err == nil || !strings.Contains(err.Error(), "artifact_id is required") {
+	if _, err := installArtifact(context.Background(), Options{Bridge: testBridge(t, marketplace.NewStore(t.TempDir()), marketregistry.NewClient(marketregistry.ClientConfig{Endpoint: "http://127.0.0.1:1"}))}, map[string]any{}); err == nil || !strings.Contains(err.Error(), "artifact_id is required") {
 		t.Fatalf("expected artifact id error, got %v", err)
 	}
-	if _, err := bindArtifact(context.Background(), Options{Store: marketplace.NewStore(t.TempDir())}, map[string]any{"artifact_id": "x"}); err == nil || !strings.Contains(err.Error(), "artifact_id and target_type") {
+	if _, err := bindArtifact(context.Background(), Options{Bridge: testBridge(t, marketplace.NewStore(t.TempDir()), nil)}, map[string]any{"artifact_id": "x"}); err == nil || !strings.Contains(err.Error(), "artifact_id and target_type") {
 		t.Fatalf("expected bind validation error, got %v", err)
 	}
 	if stringValue(123) != "123" || !boolValue("true") || boolValue("false") || intValue(float64(7), 1) != 7 || intValue("bad", 9) != 9 {
@@ -173,8 +173,7 @@ func TestSearchArtifactsCloudOnlyAndLocalLimit(t *testing.T) {
 		t.Fatal(err)
 	}
 	out, err := searchArtifacts(context.Background(), Options{
-		Store:    store,
-		Registry: marketregistry.NewClient(marketregistry.ClientConfig{Endpoint: server.URL}),
+		Bridge: testBridge(t, store, marketregistry.NewClient(marketregistry.ClientConfig{Endpoint: server.URL})),
 	}, map[string]any{"query": "release", "kind": "skill", "source": "cloud", "limit": 1})
 	if err != nil {
 		t.Fatal(err)
@@ -182,13 +181,23 @@ func TestSearchArtifactsCloudOnlyAndLocalLimit(t *testing.T) {
 	if strings.Contains(out, "Local Skill") || !strings.Contains(out, "cloud.skill.release-notes") {
 		t.Fatalf("unexpected cloud-only search output: %s", out)
 	}
-	local, err := localArtifacts(store, marketplace.ArtifactKindSkill, 1)
+	result, err := testBridge(t, store, nil).Search(context.Background(), marketbridge.SearchRequest{Kind: marketplace.ArtifactKindSkill, Limit: 1})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(local) != 1 || local[0].ID != "local.skill" {
-		t.Fatalf("unexpected local artifacts: %#v", local)
+	if len(result.Local) != 1 || result.Local[0].ID != "local.skill" {
+		t.Fatalf("unexpected local artifacts: %#v", result.Local)
 	}
+}
+
+func testBridge(t *testing.T, store *marketplace.Store, registry *marketregistry.Client) *marketbridge.DefaultBridge {
+	t.Helper()
+	return marketbridge.New(marketbridge.Options{Store: store, Registry: registry})
+}
+
+func testBridgeWithAutoInstall(t *testing.T, store *marketplace.Store, registry *marketregistry.Client) *marketbridge.DefaultBridge {
+	t.Helper()
+	return marketbridge.New(marketbridge.Options{Store: store, Registry: registry, AutoInstallSkill: true})
 }
 
 func toolListed(items []tools.ToolInfo, name string) bool {

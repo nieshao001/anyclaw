@@ -8,20 +8,16 @@ import (
 
 	"github.com/1024XEngineer/anyclaw/pkg/capability/tools"
 	"github.com/1024XEngineer/anyclaw/pkg/marketplace"
-	marketregistry "github.com/1024XEngineer/anyclaw/pkg/marketplace/registry"
+	marketbridge "github.com/1024XEngineer/anyclaw/pkg/marketplace/bridge"
 )
 
 type Options struct {
-	Store            *marketplace.Store
-	Registry         *marketregistry.Client
-	AutoInstallSkill bool
-	AuditLogger      tools.AuditLogger
-	AfterInstall     func(ctx context.Context, receipt *marketplace.InstallReceipt) error
-	AfterBind        func(ctx context.Context, binding *marketplace.Binding) error
+	Bridge      marketbridge.Bridge
+	AuditLogger tools.AuditLogger
 }
 
 func Register(registry *tools.Registry, opts Options) {
-	if registry == nil || opts.Store == nil {
+	if registry == nil || opts.Bridge == nil {
 		return
 	}
 	registry.Register(&tools.Tool{
@@ -104,39 +100,26 @@ func searchArtifacts(ctx context.Context, opts Options, input map[string]any) (s
 	kind := marketplace.NormalizeKind(stringValue(input["kind"]))
 	source := marketplace.NormalizeSource(stringValue(input["source"]))
 	limit := intValue(input["limit"], 5)
-	local, err := localArtifacts(opts.Store, kind, limit)
+	result, err := opts.Bridge.Search(ctx, marketbridge.SearchRequest{Query: query, Kind: kind, Source: source, Limit: limit})
 	if err != nil {
 		return "", err
 	}
-	var cloud []marketplace.Artifact
-	var cloudErr string
-	if source != marketplace.SourceLocal && opts.Registry != nil {
-		result, err := opts.Registry.List(ctx, marketplace.Filter{Kind: kind, Query: query, Limit: limit})
-		if err != nil {
-			cloudErr = err.Error()
-		} else {
-			cloud = result.Items
-		}
-	}
-	if source == marketplace.SourceCloud {
-		local = nil
-	}
-	route := marketplace.RouteCapabilityNeed(query, local, cloud, limit)
+	route := marketplace.RouteCapabilityNeed(query, result.Local, result.Cloud, limit)
 	return marshalJSON(map[string]any{
 		"query":       query,
 		"kind":        kind,
 		"source":      firstNonEmpty(string(source), "all"),
 		"route":       route,
-		"local_count": len(local),
-		"cloud_count": len(cloud),
-		"local":       marketplace.BuildCapabilityIndex(local),
-		"cloud":       marketplace.BuildCapabilityIndex(cloud),
-		"cloud_error": cloudErr,
+		"local_count": len(result.Local),
+		"cloud_count": len(result.Cloud),
+		"local":       marketplace.BuildCapabilityIndex(result.Local),
+		"cloud":       marketplace.BuildCapabilityIndex(result.Cloud),
+		"cloud_error": result.CloudErr,
 	})
 }
 
 func installArtifact(ctx context.Context, opts Options, input map[string]any) (string, error) {
-	if opts.Store == nil || opts.Registry == nil {
+	if opts.Bridge == nil {
 		return "", fmt.Errorf("marketplace install is not configured")
 	}
 	artifactID := strings.TrimSpace(stringValue(input["artifact_id"]))
@@ -146,61 +129,26 @@ func installArtifact(ctx context.Context, opts Options, input map[string]any) (s
 	version := strings.TrimSpace(stringValue(input["version_constraint"]))
 	userConfirmed := boolValue(input["user_confirmed"])
 	riskAcknowledged := boolValue(input["risk_acknowledged"])
-	resolved, err := opts.Registry.Resolve(ctx, artifactID, marketregistry.ResolveRequest{VersionConstraint: version})
-	if err != nil {
-		return "", err
-	}
-	resolvedPkg := resolvedPackage(resolved)
-	decision := marketplace.NewDecisionPolicy(marketplace.PolicyConfig{AutoInstallSkill: opts.AutoInstallSkill}).DecideInstall(marketplace.InstallRequest{
+	req := marketplace.InstallRequest{
 		ArtifactID:        artifactID,
 		VersionConstraint: version,
 		InstalledBy:       "agent",
 		UserConfirmed:     userConfirmed,
 		RiskAcknowledged:  riskAcknowledged,
-	}, resolvedPkg)
-	if decision.Decision == marketplace.DecisionAsk && (decision.RequiresUserConfirmation || decision.RequiresRiskAcknowledgement) {
-		_ = opts.Store.AppendAudit(marketplace.MarketAuditEvent{
-			Type:       "market.agent_install.ask",
-			ArtifactID: artifactID,
-			Actor:      "agent",
-			Decision:   string(decision.Decision),
-			Reason:     decision.Reason,
-			Detail: map[string]any{
-				"version":     resolved.Version,
-				"risk_level":  resolved.RiskLevel,
-				"trust_level": resolved.TrustLevel,
-				"permissions": resolved.Permissions,
-			},
-		})
-		return marshalJSON(map[string]any{"status": "requires_confirmation", "decision": decision, "artifact": resolvedPkg})
 	}
-	uc := marketplace.NewInstallUseCaseWithPolicy(opts.Store, registryAdapter{client: opts.Registry}, marketplace.PolicyConfig{AutoInstallSkill: opts.AutoInstallSkill})
-	job, reused, err := uc.Start(ctx, marketplace.InstallRequest{
-		ArtifactID:        artifactID,
-		VersionConstraint: version,
-		InstalledBy:       "agent",
-		UserConfirmed:     userConfirmed,
-		RiskAcknowledged:  riskAcknowledged,
-		IdempotencyKey:    "agent-" + artifactID + "-" + resolved.Version,
-	})
+	plan, err := opts.Bridge.PlanInstall(ctx, req)
 	if err != nil {
 		return "", err
 	}
-	if !reused {
-		if err := uc.Execute(ctx, job.ID); err != nil {
-			latest, _ := opts.Store.GetJob(job.ID)
-			return marshalJSON(map[string]any{"status": "failed", "job": latest, "error": err.Error()})
-		}
+	if plan.Decision.Decision == marketplace.DecisionAsk && (plan.Decision.RequiresUserConfirmation || plan.Decision.RequiresRiskAcknowledgement) {
+		return marshalJSON(map[string]any{"status": "requires_confirmation", "decision": plan.Decision, "artifact": plan.Artifact})
 	}
-	latest, _ := opts.Store.GetJob(job.ID)
-	if latest != nil && latest.State == marketplace.JobSucceeded && strings.TrimSpace(latest.ReceiptID) != "" && opts.AfterInstall != nil {
-		if receipt, receiptErr := opts.Store.GetReceipt(latest.ReceiptID); receiptErr == nil {
-			if hookErr := opts.AfterInstall(ctx, receipt); hookErr != nil {
-				return marshalJSON(map[string]any{"status": "installed", "job": latest, "reused": reused, "integration_error": hookErr.Error()})
-			}
-		}
+	req.IdempotencyKey = "agent-" + artifactID + "-" + plan.Artifact.Version
+	result, err := opts.Bridge.Install(ctx, req)
+	if err != nil {
+		return marshalJSON(map[string]any{"status": "failed", "job": result.Job, "error": err.Error()})
 	}
-	return marshalJSON(map[string]any{"status": "installed", "job": latest, "reused": reused})
+	return marshalJSON(map[string]any{"status": "installed", "job": result.Job, "reused": result.Reused})
 }
 
 func bindArtifact(ctx context.Context, opts Options, input map[string]any) (string, error) {
@@ -209,7 +157,10 @@ func bindArtifact(ctx context.Context, opts Options, input map[string]any) (stri
 	if artifactID == "" || targetType == "" {
 		return "", fmt.Errorf("artifact_id and target_type are required")
 	}
-	binding, err := opts.Store.CreateBinding(marketplace.BindingRequest{
+	if opts.Bridge == nil {
+		return "", fmt.Errorf("marketplace bridge is not configured")
+	}
+	binding, err := opts.Bridge.Bind(ctx, marketplace.BindingRequest{
 		ArtifactID: artifactID,
 		TargetType: targetType,
 		TargetID:   strings.TrimSpace(stringValue(input["target_id"])),
@@ -217,91 +168,7 @@ func bindArtifact(ctx context.Context, opts Options, input map[string]any) (stri
 	if err != nil {
 		return "", err
 	}
-	if opts.AfterBind != nil {
-		if err := opts.AfterBind(ctx, binding); err != nil {
-			return marshalJSON(map[string]any{"status": "bound", "binding": binding, "refresh_error": err.Error()})
-		}
-	}
-	_ = opts.Store.AppendAudit(marketplace.MarketAuditEvent{
-		Type:       "market.agent_bind.succeeded",
-		ArtifactID: binding.ArtifactID,
-		BindingID:  binding.ID,
-		Actor:      "agent",
-		Detail: map[string]any{
-			"target_type": binding.TargetType,
-			"target_id":   binding.TargetID,
-			"version":     binding.Version,
-		},
-	})
 	return marshalJSON(map[string]any{"status": "bound", "binding": binding})
-}
-
-func localArtifacts(store *marketplace.Store, kind marketplace.ArtifactKind, limit int) ([]marketplace.Artifact, error) {
-	receipts, err := store.ListReceipts()
-	if err != nil {
-		return nil, err
-	}
-	items := make([]marketplace.Artifact, 0, len(receipts))
-	for _, receipt := range receipts {
-		if kind != "" && receipt.Kind != kind {
-			continue
-		}
-		items = append(items, marketplace.Artifact{
-			ID:            receipt.ArtifactID,
-			Kind:          receipt.Kind,
-			Name:          receipt.Name,
-			DisplayName:   receipt.Name,
-			Version:       receipt.Version,
-			Source:        marketplace.SourceLocal,
-			Status:        marketplace.StatusInstalled,
-			Installed:     true,
-			Enabled:       true,
-			Permissions:   append([]string(nil), receipt.Permissions...),
-			RiskLevel:     receipt.RiskLevel,
-			TrustLevel:    receipt.TrustLevel,
-			Compatibility: receipt.Compatibility,
-			Dependencies:  append([]marketplace.ArtifactDependency(nil), receipt.Dependencies...),
-			Capabilities:  []string{receipt.Name, string(receipt.Kind)},
-		})
-		if limit > 0 && len(items) >= limit {
-			break
-		}
-	}
-	return items, nil
-}
-
-type registryAdapter struct {
-	client *marketregistry.Client
-}
-
-func (a registryAdapter) Resolve(ctx context.Context, artifactID, versionConstraint string) (marketplace.ResolvedPackage, error) {
-	resolved, err := a.client.Resolve(ctx, artifactID, marketregistry.ResolveRequest{VersionConstraint: versionConstraint})
-	if err != nil {
-		return marketplace.ResolvedPackage{}, err
-	}
-	return resolvedPackage(resolved), nil
-}
-
-func (a registryAdapter) Download(ctx context.Context, rawURL string) ([]byte, error) {
-	return a.client.Download(ctx, rawURL)
-}
-
-func resolvedPackage(resolved marketregistry.ResolvedArtifact) marketplace.ResolvedPackage {
-	return marketplace.ResolvedPackage{
-		ArtifactID:     resolved.ArtifactID,
-		Version:        resolved.Version,
-		DownloadURL:    resolved.DownloadURL,
-		ChecksumSHA256: resolved.ChecksumSHA256,
-		SizeBytes:      resolved.SizeBytes,
-		Compatibility:  resolved.Compatibility,
-		Dependencies:   resolved.Dependencies,
-		RiskLevel:      resolved.RiskLevel,
-		TrustLevel:     resolved.TrustLevel,
-		Permissions:    append([]string(nil), resolved.Permissions...),
-		Signature:      resolved.Signature,
-		Kind:           resolved.Kind,
-		Name:           resolved.Name,
-	}
 }
 
 func audit(opts Options, toolName string, input map[string]any, next tools.ToolFunc) tools.ToolFunc {

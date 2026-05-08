@@ -37,35 +37,31 @@ func (s *Server) handleMarketArtifacts(w http.ResponseWriter, r *http.Request) {
 		Offset:     parseIntParam(r.URL.Query().Get("offset"), 0),
 	}
 	if filter.Source == marketplace.SourceCloud {
-		result, cloudErr := s.listCloudMarketArtifacts(r, filter)
-		if cloudErr != "" {
+		list, err := s.marketplaceBridge().List(r.Context(), filter)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			return
+		}
+		if list.CloudErr != "" {
 			writeJSON(w, http.StatusOK, map[string]any{
-				"data": result,
+				"data": list.Result,
 				"meta": map[string]any{
-					"cloud_error": cloudErr,
+					"cloud_error": list.CloudErr,
 				},
 			})
 			return
 		}
-		writeJSON(w, http.StatusOK, map[string]any{"data": result})
+		writeJSON(w, http.StatusOK, map[string]any{"data": list.Result})
 		return
 	}
-	catalog := marketplace.NewLocalCatalog(marketplace.LocalCatalogDeps{
-		Config:     s.mainRuntime.Config,
-		Skills:     s.mainRuntime.Skills,
-		Plugins:    s.plugins,
-		AgentStore: s.storeModule,
-		CLIHub:     s.loadCLIHubCatalog(),
-	})
-	result, err := catalog.List(r.Context(), filter)
+	list, err := s.marketplaceBridge().List(r.Context(), filter)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
-	result.Items = s.marketplaceStore().OverlayStatus(result.Items)
 
 	writeJSON(w, http.StatusOK, map[string]any{
-		"data": result,
+		"data": list.Result,
 	})
 }
 
@@ -87,7 +83,7 @@ func (s *Server) handleMarketArtifactDetail(w http.ResponseWriter, r *http.Reque
 
 	if s.shouldUseCloudMarketArtifact(r, id) {
 		if versions {
-			items, err := s.cloudMarketVersions(r, id)
+			items, err := s.marketplaceBridge().Versions(r.Context(), id, marketplace.SourceCloud)
 			if err != nil {
 				if errors.Is(err, marketregistry.ErrNotConfigured) || errors.Is(err, marketregistry.ErrRemoteDisabled) {
 					writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "cloud registry unavailable"})
@@ -104,7 +100,7 @@ func (s *Server) handleMarketArtifactDetail(w http.ResponseWriter, r *http.Reque
 			return
 		}
 
-		artifact, err := s.cloudMarketArtifact(r, id)
+		artifact, err := s.marketplaceBridge().Get(r.Context(), id, marketplace.SourceCloud)
 		if err != nil {
 			if errors.Is(err, marketregistry.ErrNotConfigured) || errors.Is(err, marketregistry.ErrRemoteDisabled) {
 				writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "cloud registry unavailable"})
@@ -117,18 +113,12 @@ func (s *Server) handleMarketArtifactDetail(w http.ResponseWriter, r *http.Reque
 			writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
 			return
 		}
-		overlaid := s.marketplaceStore().OverlayStatus([]marketplace.Artifact{*artifact})
-		if len(overlaid) > 0 {
-			artifact = &overlaid[0]
-		}
 		writeJSON(w, http.StatusOK, map[string]any{"data": artifact})
 		return
 	}
 
-	catalog := s.localMarketCatalog()
-
 	if versions {
-		items, err := catalog.Versions(r.Context(), id)
+		items, err := s.marketplaceBridge().Versions(r.Context(), id, marketplace.SourceLocal)
 		if err != nil {
 			if errors.Is(err, marketplace.ErrArtifactNotFound) {
 				writeJSON(w, http.StatusNotFound, map[string]string{"error": "artifact not found"})
@@ -141,7 +131,7 @@ func (s *Server) handleMarketArtifactDetail(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	artifact, err := catalog.Get(r.Context(), id)
+	artifact, err := s.marketplaceBridge().Get(r.Context(), id, marketplace.SourceLocal)
 	if err != nil {
 		if errors.Is(err, marketplace.ErrArtifactNotFound) {
 			writeJSON(w, http.StatusNotFound, map[string]string{"error": "artifact not found"})
@@ -151,10 +141,6 @@ func (s *Server) handleMarketArtifactDetail(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	overlaid := s.marketplaceStore().OverlayStatus([]marketplace.Artifact{*artifact})
-	if len(overlaid) > 0 {
-		artifact = &overlaid[0]
-	}
 	writeJSON(w, http.StatusOK, map[string]any{"data": artifact})
 }
 
@@ -182,55 +168,19 @@ func (s *Server) cloudRegistryClient() *marketregistry.Client {
 }
 
 func (s *Server) listCloudMarketArtifacts(r *http.Request, filter marketplace.Filter) (marketplace.ListResult, string) {
-	client := s.cloudRegistryClient()
-	if client == nil {
-		return emptyMarketList(filter), "cloud registry endpoint is not configured"
-	}
-	filter.Source = ""
-	result, err := client.List(r.Context(), filter)
+	result, err := s.marketplaceBridge().List(r.Context(), filter)
 	if err != nil {
 		return emptyMarketList(filter), err.Error()
 	}
-	s.overlayCloudMarketStatus(r, &result, filter)
-	applyMarketStatusFilter(&result, filter.Status)
-	return result, ""
-}
-
-func (s *Server) overlayCloudMarketStatus(r *http.Request, result *marketplace.ListResult, filter marketplace.Filter) {
-	if s == nil || result == nil || len(result.Items) == 0 {
-		return
-	}
-	result.Items = s.marketplaceStore().OverlayStatus(result.Items)
-}
-
-func applyMarketStatusFilter(result *marketplace.ListResult, status marketplace.ArtifactStatus) {
-	if result == nil || status == "" {
-		return
-	}
-	items := result.Items[:0]
-	for _, item := range result.Items {
-		if item.Status == status {
-			items = append(items, item)
-		}
-	}
-	result.Items = items
-	result.Total = len(items)
+	return result.Result, result.CloudErr
 }
 
 func (s *Server) cloudMarketArtifact(r *http.Request, id string) (*marketplace.Artifact, error) {
-	client := s.cloudRegistryClient()
-	if client == nil {
-		return nil, marketregistry.ErrNotConfigured
-	}
-	return client.Get(r.Context(), id)
+	return s.marketplaceBridge().Get(r.Context(), id, marketplace.SourceCloud)
 }
 
 func (s *Server) cloudMarketVersions(r *http.Request, id string) ([]marketplace.ArtifactVersion, error) {
-	client := s.cloudRegistryClient()
-	if client == nil {
-		return nil, marketregistry.ErrNotConfigured
-	}
-	return client.Versions(r.Context(), id)
+	return s.marketplaceBridge().Versions(r.Context(), id, marketplace.SourceCloud)
 }
 
 func (s *Server) shouldUseCloudMarketArtifact(r *http.Request, id string) bool {

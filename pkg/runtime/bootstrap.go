@@ -16,6 +16,7 @@ import (
 	"github.com/1024XEngineer/anyclaw/pkg/config"
 	"github.com/1024XEngineer/anyclaw/pkg/extensions/plugin"
 	"github.com/1024XEngineer/anyclaw/pkg/marketplace"
+	marketbridge "github.com/1024XEngineer/anyclaw/pkg/marketplace/bridge"
 	marketregistry "github.com/1024XEngineer/anyclaw/pkg/marketplace/registry"
 	"github.com/1024XEngineer/anyclaw/pkg/qmd"
 	"github.com/1024XEngineer/anyclaw/pkg/runtime/orchestrator"
@@ -343,12 +344,8 @@ func Bootstrap(opts BootstrapOptions) (*MainRuntime, error) {
 	}
 	tools.RegisterBuiltins(registry, builtinOpts)
 	markettools.Register(registry, markettools.Options{
-		Store:            marketplace.NewStore(marketplaceStoreRoot(workDir, workingDir)),
-		Registry:         marketplaceRegistryClient(app.Config.Marketplace),
-		AutoInstallSkill: app.Config.Marketplace.AutoInstallSkill,
-		AuditLogger:      auditLogger,
-		AfterInstall:     app.IntegrateMarketReceiptAndRefresh,
-		AfterBind:        app.RefreshAfterMarketBinding,
+		Bridge:      app.marketplaceBridge(workDir, workingDir),
+		AuditLogger: auditLogger,
 	})
 	sk.RegisterTools(registry, skills.ExecutionOptions{AllowExec: app.Config.Plugins.AllowExec, ExecTimeoutSeconds: app.Config.Plugins.ExecTimeoutSeconds})
 	app.Tools = registry
@@ -462,6 +459,20 @@ func marketplaceRegistryClient(cfg config.MarketplaceConfig) *marketregistry.Cli
 		return nil
 	}
 	return marketregistry.NewClientFromConfig(cfg)
+}
+
+func (a *MainRuntime) marketplaceBridge(workDir, workingDir string) marketbridge.Bridge {
+	if a == nil || a.Config == nil {
+		return nil
+	}
+	return marketbridge.New(marketbridge.Options{
+		Store:            marketplace.NewStore(marketplaceStoreRoot(workDir, workingDir)),
+		Registry:         marketplaceRegistryClient(a.Config.Marketplace),
+		AutoInstallSkill: a.Config.Marketplace.AutoInstallSkill,
+		AfterInstall:     a.IntegrateMarketReceiptAndRefresh,
+		AfterBind:        a.RefreshAfterMarketBinding,
+		BeforeUninstall:  a.CleanupMarketReceiptAndRefresh,
+	})
 }
 
 func bootstrapUserProfile(cfg *config.Config) string {

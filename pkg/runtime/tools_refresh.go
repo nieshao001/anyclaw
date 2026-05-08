@@ -8,7 +8,6 @@ import (
 	"github.com/1024XEngineer/anyclaw/pkg/capability/markettools"
 	"github.com/1024XEngineer/anyclaw/pkg/capability/skills"
 	"github.com/1024XEngineer/anyclaw/pkg/capability/tools"
-	"github.com/1024XEngineer/anyclaw/pkg/marketplace"
 	"github.com/1024XEngineer/anyclaw/pkg/state/memory"
 )
 
@@ -104,12 +103,8 @@ func (a *MainRuntime) RefreshToolRegistry() error {
 	}
 	tools.RegisterBuiltins(registry, builtinOpts)
 	markettools.Register(registry, markettools.Options{
-		Store:            marketplace.NewStore(marketplaceStoreRoot(a.WorkDir, workingDir)),
-		Registry:         marketplaceRegistryClient(a.Config.Marketplace),
-		AutoInstallSkill: a.Config.Marketplace.AutoInstallSkill,
-		AuditLogger:      auditLogger,
-		AfterInstall:     a.IntegrateMarketReceiptAndRefresh,
-		AfterBind:        a.RefreshAfterMarketBinding,
+		Bridge:      a.marketplaceBridge(a.WorkDir, workingDir),
+		AuditLogger: auditLogger,
 	})
 	if a.Skills != nil {
 		a.Skills.RegisterTools(registry, skills.ExecutionOptions{AllowExec: a.Config.Plugins.AllowExec, ExecTimeoutSeconds: a.Config.Plugins.ExecTimeoutSeconds})

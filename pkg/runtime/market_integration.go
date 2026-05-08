@@ -54,6 +54,33 @@ func (a *MainRuntime) IntegrateMarketReceiptAndRefresh(ctx context.Context, rece
 	return a.RefreshToolRegistry()
 }
 
+func (a *MainRuntime) CleanupMarketReceiptAndRefresh(ctx context.Context, receipt *marketplace.InstallReceipt) error {
+	if a == nil || a.Config == nil {
+		return fmt.Errorf("runtime config is unavailable")
+	}
+	if receipt == nil {
+		return fmt.Errorf("install receipt is nil")
+	}
+	manifest := readRuntimeMarketArtifactManifest(receipt.InstalledPath)
+	switch receipt.Kind {
+	case marketplace.ArtifactKindSkill:
+		if err := a.cleanupRuntimeMarketSkill(receipt, manifest); err != nil {
+			return err
+		}
+	case marketplace.ArtifactKindAgent:
+		if err := a.cleanupRuntimeMarketAgent(receipt, manifest); err != nil {
+			return err
+		}
+	case marketplace.ArtifactKindCLI:
+		if err := a.cleanupRuntimeMarketCLI(receipt, manifest); err != nil {
+			return err
+		}
+	default:
+		return nil
+	}
+	return a.RefreshToolRegistry()
+}
+
 func (a *MainRuntime) RefreshAfterMarketBinding(ctx context.Context, binding *marketplace.Binding) error {
 	if a == nil {
 		return fmt.Errorf("runtime is unavailable")
@@ -76,6 +103,38 @@ func (a *MainRuntime) RefreshAfterMarketBinding(ctx context.Context, binding *ma
 		return fmt.Errorf("refresh after marketplace binding: %s", result.Error)
 	}
 	return nil
+}
+
+func (a *MainRuntime) cleanupRuntimeMarketSkill(receipt *marketplace.InstallReceipt, manifest runtimeMarketArtifactManifest) error {
+	skillName := firstNonEmptyRuntimeMarket(manifest.Name, receipt.Name, receipt.ArtifactID)
+	skillDirName := safeRuntimeMarketName(firstNonEmptyRuntimeMarket(receipt.ArtifactID, skillName))
+	skillsDir := config.ResolvePath(a.ConfigPath, a.Config.Skills.Dir)
+	if skillsDir == "" {
+		skillsDir = config.ResolvePath(a.ConfigPath, "skills")
+	}
+	targetDir := filepath.Join(skillsDir, skillDirName)
+	if err := removeRuntimeMarketPathWithin(skillsDir, targetDir); err != nil {
+		return err
+	}
+	return a.detachRuntimeMarketSkill(skillName)
+}
+
+func (a *MainRuntime) cleanupRuntimeMarketAgent(receipt *marketplace.InstallReceipt, manifest runtimeMarketArtifactManifest) error {
+	agentName := firstNonEmptyRuntimeMarket(manifest.Name, receipt.Name, receipt.ArtifactID)
+	if strings.TrimSpace(agentName) == "" || !a.Config.DeleteAgentProfile(agentName) {
+		return nil
+	}
+	return a.Config.Save(a.ConfigPath)
+}
+
+func (a *MainRuntime) cleanupRuntimeMarketCLI(receipt *marketplace.InstallReceipt, manifest runtimeMarketArtifactManifest) error {
+	root := filepath.Join(a.WorkingDir, "CLI-Anything")
+	spec, err := runtimeMarketCLISpec(receipt.InstalledPath, receipt, manifest)
+	if err != nil {
+		spec.Name = firstNonEmptyRuntimeMarket(manifest.ManifestSummary["command"], manifest.Name, receipt.Name, receipt.ArtifactID)
+	}
+	entryName := safeRuntimeMarketName(firstNonEmptyRuntimeMarket(spec.Name, manifest.ManifestSummary["command"], manifest.Name, receipt.Name, receipt.ArtifactID))
+	return removeRuntimeMarketCLIRegistryEntry(filepath.Join(root, "registry.json"), entryName)
 }
 
 func (a *MainRuntime) integrateRuntimeMarketSkill(receipt *marketplace.InstallReceipt, manifest runtimeMarketArtifactManifest) error {
@@ -235,6 +294,45 @@ func (a *MainRuntime) attachRuntimeMarketSkill(name, version string, permissions
 	return a.Config.Save(a.ConfigPath)
 }
 
+func (a *MainRuntime) detachRuntimeMarketSkill(name string) error {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return nil
+	}
+	changed := false
+	if profile, ok := a.Config.ResolveMainAgentProfile(); ok {
+		filtered := profile.Skills[:0]
+		for _, skill := range profile.Skills {
+			if strings.EqualFold(strings.TrimSpace(skill.Name), name) {
+				changed = true
+				continue
+			}
+			filtered = append(filtered, skill)
+		}
+		profile.Skills = filtered
+		if changed {
+			if err := a.Config.UpsertAgentProfile(profile); err != nil {
+				return err
+			}
+			return a.Config.Save(a.ConfigPath)
+		}
+		return nil
+	}
+	filtered := a.Config.Agent.Skills[:0]
+	for _, skill := range a.Config.Agent.Skills {
+		if strings.EqualFold(strings.TrimSpace(skill.Name), name) {
+			changed = true
+			continue
+		}
+		filtered = append(filtered, skill)
+	}
+	a.Config.Agent.Skills = filtered
+	if changed {
+		return a.Config.Save(a.ConfigPath)
+	}
+	return nil
+}
+
 func readRuntimeMarketArtifactManifest(root string) runtimeMarketArtifactManifest {
 	var manifest runtimeMarketArtifactManifest
 	data, err := os.ReadFile(filepath.Join(root, "anyclaw.artifact.json"))
@@ -316,6 +414,55 @@ func upsertRuntimeMarketCLIRegistryEntry(path, name string, entry map[string]any
 		return err
 	}
 	return os.WriteFile(path, data, 0o644)
+}
+
+func removeRuntimeMarketCLIRegistryEntry(path, name string) error {
+	var registry struct {
+		Meta map[string]string `json:"meta"`
+		CLIs []map[string]any  `json:"clis"`
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	if err := json.Unmarshal(data, &registry); err != nil {
+		return err
+	}
+	filtered := registry.CLIs[:0]
+	removed := false
+	for _, entry := range registry.CLIs {
+		if strings.EqualFold(fmt.Sprint(entry["name"]), name) {
+			removed = true
+			continue
+		}
+		filtered = append(filtered, entry)
+	}
+	if !removed {
+		return nil
+	}
+	registry.CLIs = filtered
+	data, err = json.MarshalIndent(registry, "", "  ")
+	if err != nil {
+		return err
+	}
+	data = append(data, '\n')
+	return os.WriteFile(path, data, 0o644)
+}
+
+func removeRuntimeMarketPathWithin(base, target string) error {
+	if strings.TrimSpace(base) == "" || strings.TrimSpace(target) == "" {
+		return nil
+	}
+	if !pathWithinRuntimeMarketBase(base, target) {
+		return fmt.Errorf("marketplace cleanup path escapes base: %s", target)
+	}
+	if err := os.RemoveAll(target); err != nil {
+		return err
+	}
+	return nil
 }
 
 func copyRuntimeMarketDirContents(srcDir, destDir string) error {
