@@ -96,7 +96,7 @@ func TestMarketUpgradeAndUninstallUseBridge(t *testing.T) {
 	defer registry.Close()
 
 	server := newGatewayMarketTestServer(t, registry.URL)
-	runQueuedMarketJobs(t, server)
+	runner := runQueuedMarketJobs(t, server)
 	receipt := &marketplace.InstallReceipt{
 		ID:            "cloud.skill.release-notes@1.0.0",
 		ArtifactID:    "cloud.skill.release-notes",
@@ -150,6 +150,7 @@ func TestMarketUpgradeAndUninstallUseBridge(t *testing.T) {
 		t.Fatal(err)
 	}
 	job := waitGatewayMarketJob(t, server, upgradePayload.JobID)
+	runner.Wait(t)
 	if job.State != marketplace.JobSucceeded || job.Version != "2.0.0" {
 		t.Fatalf("job = %#v, want upgraded to 2.0.0", job)
 	}
@@ -270,13 +271,52 @@ func newGatewayMarketTestServer(t *testing.T, endpoint string) *Server {
 	return server
 }
 
-func runQueuedMarketJobs(t *testing.T, server *Server) {
+type gatewayMarketJobRunner struct {
+	done      chan struct{}
+	completed chan struct{}
+	stopped   chan struct{}
+}
+
+func runQueuedMarketJobs(t *testing.T, server *Server) *gatewayMarketJobRunner {
 	t.Helper()
+	runner := &gatewayMarketJobRunner{
+		done:      make(chan struct{}),
+		completed: make(chan struct{}, 16),
+		stopped:   make(chan struct{}),
+	}
 	go func() {
-		for job := range server.jobQueue {
-			job()
+		defer close(runner.stopped)
+		for {
+			select {
+			case job := <-server.jobQueue:
+				job()
+				select {
+				case runner.completed <- struct{}{}:
+				case <-runner.done:
+					return
+				}
+			case <-runner.done:
+				return
+			}
 		}
 	}()
+	t.Cleanup(func() {
+		close(runner.done)
+		<-runner.stopped
+	})
+	return runner
+}
+
+func (r *gatewayMarketJobRunner) Wait(t *testing.T) {
+	t.Helper()
+	if r == nil {
+		return
+	}
+	select {
+	case <-r.completed:
+	case <-time.After(5 * time.Second):
+		t.Fatal("queued market job did not finish")
+	}
 }
 
 func waitGatewayMarketJob(t *testing.T, server *Server, jobID string) *marketplace.InstallJob {
