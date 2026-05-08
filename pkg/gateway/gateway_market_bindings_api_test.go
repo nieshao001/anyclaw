@@ -88,3 +88,16 @@ func TestMarketRefreshAndBindingValidation(t *testing.T) {
 		t.Fatalf("nil server changed target values: %q %q %q %q", agent, orgID, projectID, workspaceID)
 	}
 }
+
+func TestMarketBindingCreateReturnsUnavailableWithoutRuntime(t *testing.T) {
+	server := &Server{marketJobs: marketplace.NewStore(t.TempDir())}
+
+	rec := httptest.NewRecorder()
+	server.handleMarketBindings(rec, httptest.NewRequest(http.MethodPost, "/market/bindings", strings.NewReader(`{"artifact_id":"x","target_type":"main_agent"}`)))
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("binding status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "runtime config is unavailable") {
+		t.Fatalf("binding body = %s", rec.Body.String())
+	}
+}

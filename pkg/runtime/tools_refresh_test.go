@@ -298,6 +298,64 @@ func TestIntegrateMarketCLIRejectsMissingEntryPoint(t *testing.T) {
 	}
 }
 
+func TestCleanupMarketReceiptRemovesIntegratedSkill(t *testing.T) {
+	tempDir := t.TempDir()
+	installed := filepath.Join(tempDir, "installed")
+	if err := os.MkdirAll(filepath.Join(installed, "skill"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeJSONFileRuntimeMarket(t, filepath.Join(installed, "anyclaw.artifact.json"), map[string]any{
+		"id":      "cloud.skill.release-notes",
+		"kind":    "skill",
+		"name":    "Release Notes",
+		"version": "1.0.0",
+	})
+	if err := os.WriteFile(filepath.Join(installed, "skill", "SKILL.md"), []byte("# Release Notes\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.DefaultConfig()
+	cfg.Agent.Name = "Main Agent"
+	cfg.Agent.ActiveProfile = "Main Agent"
+	cfg.Agent.Profiles = []config.AgentProfile{{Name: "Main Agent"}}
+	cfg.Skills.Dir = filepath.Join(tempDir, "skills")
+	rt := &MainRuntime{
+		ConfigPath: filepath.Join(tempDir, "anyclaw.json"),
+		Config:     cfg,
+		WorkingDir: tempDir,
+	}
+	receipt := &marketplace.InstallReceipt{
+		ID:            "cloud.skill.release-notes@1.0.0",
+		ArtifactID:    "cloud.skill.release-notes",
+		Kind:          marketplace.ArtifactKindSkill,
+		Name:          "Release Notes",
+		Version:       "1.0.0",
+		InstalledPath: installed,
+	}
+	if err := rt.IntegrateMarketReceiptAndRefresh(context.Background(), receipt); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(cfg.Skills.Dir, "cloud-skill-release-notes")); err != nil {
+		t.Fatalf("expected integrated skill dir: %v", err)
+	}
+	profile, ok := cfg.ResolveMainAgentProfile()
+	if !ok || len(profile.Skills) != 1 || profile.Skills[0].Name != "Release Notes" {
+		t.Fatalf("profile skills after integrate = %#v", profile.Skills)
+	}
+	if err := rt.CleanupMarketReceiptAndRefresh(context.Background(), receipt); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(cfg.Skills.Dir, "cloud-skill-release-notes")); !os.IsNotExist(err) {
+		t.Fatalf("integrated skill dir err = %v, want not exist", err)
+	}
+	profile, ok = cfg.ResolveMainAgentProfile()
+	if !ok {
+		t.Fatal("expected main profile to remain")
+	}
+	if len(profile.Skills) != 0 {
+		t.Fatalf("profile skills after cleanup = %#v, want empty", profile.Skills)
+	}
+}
+
 type refreshToolLLM struct {
 	toolName string
 	calls    int

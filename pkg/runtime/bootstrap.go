@@ -471,6 +471,7 @@ func (a *MainRuntime) marketplaceBridge(workDir, workingDir string) marketbridge
 		AutoInstallSkill: a.Config.Marketplace.AutoInstallSkill,
 		AfterInstall:     a.IntegrateMarketReceiptAndRefresh,
 		AfterBind:        a.RefreshAfterMarketBinding,
+		BeforeUninstall:  a.CleanupMarketReceiptAndRefresh,
 	})
 }
 

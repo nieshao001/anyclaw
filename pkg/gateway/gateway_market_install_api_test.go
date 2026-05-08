@@ -3,6 +3,7 @@ package gateway
 import (
 	"archive/zip"
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -110,8 +111,23 @@ func TestMarketUpgradeAndUninstallUseBridge(t *testing.T) {
 	if err := os.MkdirAll(receipt.InstalledPath, 0o755); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.MkdirAll(filepath.Join(receipt.InstalledPath, "skill"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(receipt.InstalledPath, "anyclaw.artifact.json"), []byte(`{"id":"cloud.skill.release-notes","kind":"skill","name":"Release Notes","version":"1.0.0"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(receipt.InstalledPath, "skill", "SKILL.md"), []byte("# Release Notes\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	if err := server.marketplaceStore().SaveReceipt(receipt); err != nil {
 		t.Fatal(err)
+	}
+	if err := server.mainRuntime.IntegrateMarketReceiptAndRefresh(context.Background(), receipt); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(server.mainRuntime.Config.Skills.Dir, "cloud-skill-release-notes")); err != nil {
+		t.Fatalf("expected integrated skill dir: %v", err)
 	}
 	binding, err := server.marketplaceStore().CreateBinding(marketplace.BindingRequest{
 		ArtifactID: receipt.ArtifactID,
@@ -161,6 +177,9 @@ func TestMarketUpgradeAndUninstallUseBridge(t *testing.T) {
 	}
 	if bindings, err := server.marketplaceStore().ListBindings(); err != nil || len(bindings.Items) != 0 {
 		t.Fatalf("bindings after uninstall = %#v err=%v, want removed", bindings.Items, err)
+	}
+	if _, err := os.Stat(filepath.Join(server.mainRuntime.Config.Skills.Dir, "cloud-skill-release-notes")); !os.IsNotExist(err) {
+		t.Fatalf("integrated skill dir err = %v, want not exist", err)
 	}
 }
 

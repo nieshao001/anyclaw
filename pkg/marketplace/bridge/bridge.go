@@ -65,6 +65,7 @@ type Options struct {
 	AutoInstallSkill bool
 	AfterInstall     func(context.Context, *marketplace.InstallReceipt) error
 	AfterBind        func(context.Context, *marketplace.Binding) error
+	BeforeUninstall  func(context.Context, *marketplace.InstallReceipt) error
 	AfterUninstall   func(context.Context, *marketplace.UninstallResult) error
 }
 
@@ -75,6 +76,7 @@ type DefaultBridge struct {
 	autoInstallSkill bool
 	afterInstall     func(context.Context, *marketplace.InstallReceipt) error
 	afterBind        func(context.Context, *marketplace.Binding) error
+	beforeUninstall  func(context.Context, *marketplace.InstallReceipt) error
 	afterUninstall   func(context.Context, *marketplace.UninstallResult) error
 }
 
@@ -86,6 +88,7 @@ func New(opts Options) *DefaultBridge {
 		autoInstallSkill: opts.AutoInstallSkill,
 		afterInstall:     opts.AfterInstall,
 		afterBind:        opts.AfterBind,
+		beforeUninstall:  opts.BeforeUninstall,
 		afterUninstall:   opts.AfterUninstall,
 	}
 }
@@ -368,6 +371,15 @@ func (b *DefaultBridge) Uninstall(ctx context.Context, req marketplace.Uninstall
 	if b == nil || b.store == nil {
 		return nil, fmt.Errorf("marketplace bridge store is not configured")
 	}
+	receipt, err := b.uninstallReceipt(req)
+	if err != nil {
+		return nil, err
+	}
+	if b.beforeUninstall != nil {
+		if err := b.beforeUninstall(ctx, receipt); err != nil {
+			return nil, err
+		}
+	}
 	result, err := marketplace.NewLifecycleService(b.store).Uninstall(req)
 	if err != nil {
 		return nil, err
@@ -420,6 +432,16 @@ func (b *DefaultBridge) findBinding(bindingID string) *marketplace.Binding {
 		}
 	}
 	return nil
+}
+
+func (b *DefaultBridge) uninstallReceipt(req marketplace.UninstallRequest) (*marketplace.InstallReceipt, error) {
+	if b == nil || b.store == nil {
+		return nil, fmt.Errorf("marketplace bridge store is not configured")
+	}
+	if receiptID := strings.TrimSpace(req.ReceiptID); receiptID != "" {
+		return b.store.GetReceipt(receiptID)
+	}
+	return b.store.LatestReceiptForArtifact(strings.TrimSpace(req.ArtifactID))
 }
 
 func (b *DefaultBridge) listCloud(ctx context.Context, filter marketplace.Filter) (marketplace.ListResult, string) {

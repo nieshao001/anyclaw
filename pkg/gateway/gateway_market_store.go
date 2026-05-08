@@ -43,6 +43,12 @@ func (s *Server) marketplaceBridge() marketbridge.Bridge {
 			}
 			return s.mainRuntime.RefreshAfterMarketBinding(ctx, binding)
 		},
+		BeforeUninstall: func(ctx context.Context, receipt *marketplace.InstallReceipt) error {
+			if s.mainRuntime == nil {
+				return nil
+			}
+			return s.mainRuntime.CleanupMarketReceiptAndRefresh(ctx, receipt)
+		},
 		AfterUninstall: func(ctx context.Context, result *marketplace.UninstallResult) error {
 			return s.refreshAfterMarketUninstall(ctx)
 		},

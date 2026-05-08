@@ -26,7 +26,11 @@ func (s *Server) handleMarketBindings(w http.ResponseWriter, r *http.Request) {
 		}
 		normalized, err := s.normalizeMarketBindingRequest(req)
 		if err != nil {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			status := http.StatusBadRequest
+			if err == errMarketRuntimeUnavailable {
+				status = http.StatusServiceUnavailable
+			}
+			writeJSON(w, status, map[string]string{"error": err.Error()})
 			return
 		}
 		binding, err := s.marketplaceBridge().Bind(r.Context(), normalized)
@@ -122,6 +126,9 @@ func (s *Server) handleMarketRefresh(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) normalizeMarketBindingRequest(req marketplace.BindingRequest) (marketplace.BindingRequest, error) {
+	if s == nil || s.mainRuntime == nil || s.mainRuntime.Config == nil {
+		return req, errMarketRuntimeUnavailable
+	}
 	req.ArtifactID = strings.TrimSpace(req.ArtifactID)
 	req.ReceiptID = strings.TrimSpace(req.ReceiptID)
 	req.TargetType = marketplace.NormalizeBindingTargetType(string(req.TargetType))
@@ -177,6 +184,8 @@ type errString string
 func (e errString) Error() string {
 	return string(e)
 }
+
+var errMarketRuntimeUnavailable = errString("runtime config is unavailable")
 
 func (s *Server) marketHotReload() *runtime.HotReloadCoordinator {
 	if s == nil {
